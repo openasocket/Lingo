@@ -1,0 +1,66 @@
+# Fiddycent Software License
+
+Publication status: repository-ready source-available license package for publication and use. This is not legal advice.
+Repository label guidance: restricted-use source-available. Do not describe this package as open source unless the project adopts materially different terms after separate review.
+
+## 1. Licensor and Software
+
+This license governs the software project identified as **lingo** (the "Software") and is offered by **FYC Team** (the "Licensor").
+
+Primary repository publication location: **https://github.com/openasocket/lingo**.
+
+Licensor notice contact for repository publication: **legal@fyc.llc**.
+
+## 2. Grant of Rights
+
+Subject to this license, each recipient that is not a forbidden party receives a non-exclusive, non-transferable, revocable permission to review, download, reproduce, run, modify, and privately evaluate the Software, and may provide hosted or network access to permitted users, solely with respect to the Software made available from the repository publication location identified above. This license is intended as a restricted-use source-available license, not an open-source license. No implied patent license, trademark license, or right to use the Licensor's names, logos, or brand features is granted except as required to identify the origin of the Software.
+
+## 3. Scope and Core Restrictions
+
+Except as expressly permitted by the grant above, no recipient may copy the Software, modify the Software, distribute the Software, prepare derivative works from the Software, and provide hosted or network access to the Software if the act is for the benefit of, on behalf of, at the direction of, or as part of a service arrangement with a forbidden party. Downloading or accessing repository materials is permitted only as reasonably necessary to exercise the licensed rights granted above, and this license does not treat mere public visibility of the repository as a standalone contractual prohibition on reading, observing, or discussing the Software. Each restriction in this license should be interpreted as targeting copyright-linked conduct involving the Software or protected adaptations, not abstract learning, independent reimplementation, or uncopied know-how. No recipient may use the Software, repository contents, or protected derivative works as training input to any machine learning model, heuristic system, or other automated analysis system, nor to derive embeddings, weights, patterns, or other machine-generated artifacts from the Software for model development, tuning, or operation, unless the Licensor expressly authorizes that use in writing.
+
+## 4. Prohibited Parties and Defined Relationships
+
+For purposes of this license, forbidden parties include the named forbidden entities, their affiliates, and their employees acting within the scope of their duties. Person-level coverage applies only where the relevant person is acting within the scope of that relationship for the forbidden entity's benefit, and should be read through defined agency, employment, contractor, or customer relationships rather than through generalized association language or passive status alone.
+
+## 5. Forbidden List Reference
+
+Schedule A identifies the current named forbidden entities list for this license: `SCHEDULE-A-FORBIDDEN-ENTITIES.md`. The Licensor may replace or supplement that schedule in later releases to add, remove, or clarify named entities, categories, relationship notes, or effective-date context. Repository publication should keep the current Schedule A with the license text or in another clearly linked location that is versioned with the Software release, and maintainers should describe list provenance and practical proof limits in the companion verification note distributed with the generated package.
+
+## 6. Derivative Works
+
+Derivative works, modifications, wrappers, and redistributions remain subject to these restrictions only to the extent they incorporate protected expression from the Software or otherwise qualify as derivative works under applicable copyright law. For clarity, this section is directed to modified copies, integrated code, wrappers, ports, and other adaptations that include protected expression from the Software. It does not claim control over separate works that merely interoperate with the Software, describe similar functionality, or are independently created without copying protected expression.
+
+## 7. Downstream Obligations
+
+No recipient may directly or indirectly distribute, sublicense, host, embed, disclose, demonstrate, benchmark for, or otherwise provide the Software, any protected derivative work, hosted access to the Software, or any non-public benchmark, model-training artifact, or analysis materially derived from the Software in a manner intended to enable, assist, or reasonably expected to assist a forbidden party, or any person acting on its behalf, to obtain the practical benefit of the licensed material. No recipient may avoid these restrictions through an intermediary, former employee, current employee, contractor, consultant, educator, recruiter, agent, or other third party. If a recipient redistributes the Software or a protected derivative work, the recipient must preserve this license text, preserve the reference to Schedule A, and provide downstream recipients with notice that the Software is offered on a restricted-use source-available basis. Recipients engaged in redistribution, hosted access, or enterprise deployment should maintain reasonable records showing that they are not knowingly providing the Software, protected derivative works, or materially derived non-public artifacts for or on behalf of a forbidden party, and must provide explanatory information upon reasonable written request from the Licensor.
+
+## 8. Exceptions
+
+The Licensor may approve a case-specific written exception. Any exception must be signed or otherwise issued in writing by legal@fyc.llc, must identify the named recipient or class of recipients, and must state the covered acts, material, forbidden-party designation override if any, and the effective duration. Unless the exception says otherwise, it is revocable on written notice, does not waive future enforcement, and does not authorize conduct outside the expressly stated scope. A later written exception or reinstatement notice supersedes an earlier one only to the extent the later writing says so.
+
+## 9. Termination
+
+Any violation of the grant, scope, prohibited-party, or downstream-distribution restrictions in this license automatically terminates the affected recipient's rights under this license as to the violating conduct unless the Licensor restores rights or grants a written exception in writing. Termination under this section does not expand the Licensor's rights beyond applicable law, and contract-only obligations, if any, remain subject to applicable non-copyright remedies.
+
+## 10. Disclaimer
+
+The Software is provided "as is," without warranties or conditions of any kind, express or implied, to the maximum extent permitted by applicable law. Nothing in this section is intended to exclude non-waivable rights or remedies that cannot be disclaimed under applicable law.
+
+## 11. Interpretation and Publication Limits
+
+This license should be interpreted consistently with applicable copyright law, mandatory software-law limitations, and the project research posture reflected in the policy matrix. It does not purport to restrict ideas, principles, interfaces, generalized know-how, security research conducted without copying protected expression, or independent implementations except to the extent protected expression is actually copied. Governing law, venue, severability language, consumer-law carveouts, export controls, and repository-specific notice mechanics remain subject to jurisdiction-specific review for each publication context.
+
+## 12. Addendum: Integrated Schedule A
+
+The following Schedule A is incorporated into this license for single-file distribution convenience. Any separately published copy of Schedule A for the same package version should remain synchronized with this integrated copy.
+
+### Schedule A: Forbidden Entities
+
+Project: **lingo**
+Schedule version: **2026-04-07-lingo-initial**
+Maintained by: **FYC Team legal and release manager**
+This schedule lists entities that fall within the restricted-party concept for the current license package.
+
+Entries:
+- FTI Consulting, Inc.

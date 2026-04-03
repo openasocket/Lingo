@@ -1,0 +1,191 @@
+//! lingo CLI — translate text and score similarity from the command line.
+
+use lingo::{LaBSEEncoder, NllbLanguage, NllbTranslator};
+use clap::{Parser, Subcommand};
+use std::io::{self, BufRead, IsTerminal, Write};
+
+#[derive(Parser)]
+#[command(name = "lingo")]
+#[command(about = "Multilingual NLP: translation (NLLB-200) and similarity scoring (LaBSE) on Metal/CUDA GPU")]
+#[command(version)]
+struct Args {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Translate text between languages using NLLB-200
+    Translate {
+        /// Text to translate (reads stdin if omitted)
+        text: Option<String>,
+        /// Source language (ISO 639-1)
+        #[arg(short = 'f', long, default_value = "en")]
+        from: String,
+        /// Target language(s), comma-separated
+        #[arg(short = 't', long)]
+        to: String,
+        /// Path to NLLB model directory
+        #[arg(long)]
+        model_dir: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Score semantic similarity between two texts using LaBSE
+    Score {
+        /// First text
+        text1: String,
+        /// Second text
+        text2: String,
+        /// Path to LaBSE model directory
+        #[arg(long)]
+        model_dir: Option<String>,
+    },
+
+    /// Embed text into a 768-dim vector using LaBSE
+    Embed {
+        /// Text to embed
+        text: String,
+        /// Path to LaBSE model directory
+        #[arg(long)]
+        model_dir: Option<String>,
+    },
+
+    /// List all supported languages
+    Languages,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "lingo=info".into()),
+        )
+        .with_target(false)
+        .init();
+
+    // License gate — must accept before using the CLI.
+    if !lingo::license::license_accepted() {
+        eprintln!("{}", lingo::license::license_notice());
+        if io::stdin().is_terminal() {
+            eprint!("\nTo accept, type 'I ACCEPT' (or set LINGO_ACCEPT_LICENSE=1):\n> ");
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if input.trim() == "I ACCEPT" {
+                lingo::license::mark_license_accepted()?;
+                eprintln!("License accepted.");
+            } else {
+                eprintln!("License not accepted. Exiting.");
+                std::process::exit(1);
+            }
+        } else {
+            eprintln!("License not accepted. Exiting.");
+            std::process::exit(1);
+        }
+    }
+
+    let args = Args::parse();
+
+    match args.command {
+        Commands::Translate { text, from, to, model_dir, json } => {
+            let translator = NllbTranslator::new(model_dir.map(std::path::PathBuf::from))?;
+
+            if !translator.is_model_downloaded() {
+                eprintln!("NLLB-200-distilled-600M model not found.");
+                eprintln!("Location: {}", translator.model_dir().display());
+                eprintln!();
+
+                if io::stdin().is_terminal() {
+                    eprint!("Download from HuggingFace? (~1.2 GB) [Y/n] ");
+                    io::stderr().flush()?;
+
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    let input = input.trim().to_lowercase();
+
+                    if input.is_empty() || input == "y" || input == "yes" {
+                        eprintln!();
+                        eprintln!("Downloading model files...");
+                        translator.download_model()?;
+                        eprintln!("Download complete.");
+                        eprintln!();
+                    } else {
+                        eprintln!("Download cancelled.");
+                        std::process::exit(1);
+                    }
+                } else {
+                    eprintln!("Run interactively to auto-download, or download manually:");
+                    eprintln!(
+                        "  python scripts/convert_nllb_safetensors.py --output-dir {}",
+                        translator.model_dir().display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+
+            let text = match text {
+                Some(t) => t,
+                None => {
+                    let mut lines = Vec::new();
+                    for line in io::stdin().lock().lines() { lines.push(line?); }
+                    lines.join("\n")
+                }
+            };
+
+            translator.load().await?;
+            let targets: Vec<&str> = to.split(',').map(|s| s.trim()).collect();
+            let mut results = Vec::new();
+
+            for target in &targets {
+                match translator.translate(&text, &from, target).await {
+                    Ok(r) => {
+                        if json {
+                            results.push(serde_json::json!({
+                                "source": text, "source_lang": from,
+                                "target_lang": target, "translation": r.text,
+                                "duration_ms": r.duration_ms,
+                            }));
+                        } else {
+                            println!("[{}] {} ({}ms)", target, r.text, r.duration_ms);
+                        }
+                    }
+                    Err(e) => eprintln!("Error translating to {}: {}", target, e),
+                }
+            }
+            if json { println!("{}", serde_json::to_string_pretty(&results)?); }
+        }
+
+        Commands::Score { text1, text2, model_dir } => {
+            let encoder = LaBSEEncoder::new(model_dir.map(std::path::PathBuf::from))?;
+            if !encoder.is_model_downloaded() {
+                eprintln!("LaBSE model not found at: {}", encoder.model_dir().display());
+                std::process::exit(1);
+            }
+            let score = encoder.score(&text1, &text2).await?;
+            println!("{:.4}", score);
+        }
+
+        Commands::Embed { text, model_dir } => {
+            let encoder = LaBSEEncoder::new(model_dir.map(std::path::PathBuf::from))?;
+            if !encoder.is_model_downloaded() {
+                eprintln!("LaBSE model not found at: {}", encoder.model_dir().display());
+                std::process::exit(1);
+            }
+            let embedding = encoder.embed(&text).await?;
+            println!("{}", serde_json::to_string(&embedding)?);
+        }
+
+        Commands::Languages => {
+            println!("{:<6} {:<30} {}", "Code", "Language", "NLLB Code");
+            println!("{}", "-".repeat(60));
+            for lang in NllbLanguage::all_languages() {
+                println!("{:<6} {:<30} {}", lang.iso_code(), lang.name(), lang.nllb_code());
+            }
+        }
+    }
+
+    Ok(())
+}

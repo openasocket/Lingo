@@ -1,0 +1,84 @@
+[workspace]
+
+[package]
+name = "lingo"
+version = "0.1.0"
+edition = "2021"
+authors = ["FYC Team"]
+description = "Pure Rust multilingual NLP: NLLB-200 translation + LaBSE/SONAR similarity scoring with Metal/CUDA GPU acceleration via candle"
+license-file = "LICENSE"
+repository = "https://github.com/openasocket/lingo"
+keywords = ["translation", "nllb", "labse", "sonar", "candle"]
+categories = ["text-processing", "science", "algorithms"]
+readme = "README.md"
+
+[lib]
+name = "lingo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lingo"
+path = "src/cli.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "translate"
+path = "examples/translate.rs"
+
+[[example]]
+name = "similarity"
+path = "examples/similarity.rs"
+
+[[example]]
+name = "server"
+path = "examples/server.rs"
+required-features = ["server"]
+
+[dependencies]
+# ML framework
+candle-core = { version = "0.10", default-features = false }
+candle-nn = { version = "0.10", default-features = false }
+
+# Tokenization
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+
+# Model downloads
+hf-hub = { version = "0.3", optional = true }
+
+# Async
+tokio = { version = "1", features = ["sync"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Directory utilities
+dirs = "5.0"
+
+# CLI (optional)
+clap = { version = "4.5", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+indicatif = { version = "0.17", optional = true }
+
+# Server (optional)
+axum = { version = "0.7", optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+
+[features]
+default = []
+metal = ["candle-core/metal"]
+cuda = ["candle-core/cuda"]
+accelerate = ["candle-core/accelerate"]
+download = ["hf-hub"]
+cli = ["clap", "tracing-subscriber", "indicatif", "download", "tokio/full"]
+server = ["axum", "tower-http", "tracing-subscriber", "tokio/full"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
