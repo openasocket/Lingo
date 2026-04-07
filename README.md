@@ -101,18 +101,39 @@ echo "Hello world" | lingo translate --to fr
 lingo translate "Hello" --to fr,es --json
 ```
 
-### Score Similarity
+### Score Similarity (LaBSE)
 
 ```bash
 lingo score "Hello world" "Bonjour le monde"
-# 0.8534
+# 0.9471
 ```
 
-### Embed
+### Score Similarity (SONAR)
+
+```bash
+lingo sonar-score "Hello world" "Bonjour le monde"
+# 0.7441
+```
+
+### Embed (LaBSE)
 
 ```bash
 lingo embed "Hello world"
 # [0.0234, -0.0891, 0.0412, ...]  (768 floats)
+```
+
+### Embed (SONAR)
+
+```bash
+lingo sonar-embed "Hello world"
+# [0.0123, -0.0456, 0.0789, ...]  (1024 floats)
+```
+
+### Download Models
+
+```bash
+lingo download all     # Download all models
+lingo download sonar   # Download just SONAR
 ```
 
 ### List Languages
@@ -171,7 +192,21 @@ print(score("Hello", "Bonjour")["score"])              # 0.85
 
 ## Model Setup
 
+All models auto-download when first used via the CLI. You can also download them explicitly:
+
+```bash
+# Download all models at once
+lingo download all
+
+# Or individually
+lingo download nllb    # NLLB-200 (~1.2 GB from HuggingFace)
+lingo download labse   # LaBSE (~1.8 GB from HuggingFace)
+lingo download sonar   # SONAR (~3 GB, requires Python for conversion)
+```
+
 ### NLLB-200 (translation)
+
+Auto-downloads from HuggingFace, or convert manually:
 
 ```bash
 python scripts/convert_nllb_safetensors.py
@@ -180,7 +215,7 @@ python scripts/convert_nllb_safetensors.py
 
 ### LaBSE (similarity/embeddings)
 
-Download from [sentence-transformers/LaBSE](https://huggingface.co/sentence-transformers/LaBSE):
+Auto-downloads from [sentence-transformers/LaBSE](https://huggingface.co/sentence-transformers/LaBSE):
 
 ```
 ~/.cache/lingo/labse/
@@ -191,6 +226,8 @@ Download from [sentence-transformers/LaBSE](https://huggingface.co/sentence-tran
 ```
 
 ### SONAR (similarity/embeddings)
+
+Auto-downloads from Meta's CDN and converts to safetensors (requires Python 3 with `torch`, `safetensors`, `sentencepiece`, `tokenizers`):
 
 ```bash
 python scripts/convert_sonar_safetensors.py
@@ -224,7 +261,7 @@ LINGO_ACCEPT_LICENSE=1 ./target/release/lingo translate "Hello world" --to fr
 
 ## Performance
 
-All benchmarks are release builds (`cargo build --release`), measuring warm inference (model already loaded) unless noted otherwise. NLLB uses F16 weights via conversion script; LaBSE uses F32 weights; SONAR uses F32 weights.
+All benchmarks are release builds (`cargo build --release`), measuring warm inference (model already loaded) unless noted otherwise. NLLB uses F16 weights via conversion script; LaBSE and SONAR use F32 weights.
 
 ### NVIDIA RTX 5090 — CUDA 13.0
 
@@ -232,15 +269,18 @@ All benchmarks are release builds (`cargo build --release`), measuring warm infe
 
 | Operation | Time | Notes |
 |-----------|------|-------|
-| NLLB translation (short, warm) | ~87ms | Cached encoder, subsequent targets |
-| NLLB translation (short, cold) | ~186ms | First target in invocation |
-| NLLB translation (paragraph, 3 targets) | ~370ms avg | 40-word input |
-| NLLB multi-target (10 languages) | ~1.05s total | Single invocation |
-| NLLB model load | ~850ms | |
-| NLLB cold start (load + first translate) | ~1.4s | |
-| LaBSE similarity (per pair) | ~20ms | Custom BERT encoder |
-| LaBSE model load | ~730ms | |
-| LaBSE cold start (load + first score) | ~1.2s | |
+| NLLB translation (short, warm) | ~57ms | Cached encoder, subsequent targets |
+| NLLB translation (short, cold) | ~169ms | First target in invocation |
+| NLLB translation (paragraph, 3 targets) | ~371ms avg | 40-word input |
+| NLLB multi-target (10 languages) | ~224ms total | Single invocation |
+| NLLB model load | ~1.27s | |
+| NLLB cold start (load + first translate) | ~1.44s | |
+| LaBSE similarity (per pair) | ~9ms | Custom BERT encoder |
+| LaBSE model load | ~839ms | |
+| LaBSE cold start (load + first score) | ~926ms | |
+| SONAR similarity (per pair) | ~14ms | 24-layer transformer encoder |
+| SONAR model load | ~916ms | F32 weights |
+| SONAR cold start (load + first score) | ~953ms | |
 
 ### Apple M5 Max — Metal GPU
 

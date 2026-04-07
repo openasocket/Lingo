@@ -1,12 +1,12 @@
 //! lingo CLI — translate text and score similarity from the command line.
 
-use lingo::{LaBSEEncoder, NllbLanguage, NllbTranslator};
+use lingo::{LaBSEEncoder, NllbLanguage, NllbTranslator, SonarEncoder};
 use clap::{Parser, Subcommand};
 use std::io::{self, BufRead, IsTerminal, Write};
 
 #[derive(Parser)]
 #[command(name = "lingo")]
-#[command(about = "Multilingual NLP: translation (NLLB-200) and similarity scoring (LaBSE) on Metal/CUDA GPU")]
+#[command(about = "Multilingual NLP: translation (NLLB-200), similarity scoring (LaBSE/SONAR) on Metal/CUDA GPU")]
 #[command(version)]
 struct Args {
     #[command(subcommand)]
@@ -33,7 +33,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Score semantic similarity between two texts using LaBSE
+    /// Score semantic similarity between two texts using LaBSE (768-dim)
     Score {
         /// First text
         text1: String,
@@ -53,8 +53,54 @@ enum Commands {
         model_dir: Option<String>,
     },
 
+    /// Score semantic similarity using SONAR (1024-dim)
+    SonarScore {
+        /// First text
+        text1: String,
+        /// Second text
+        text2: String,
+        /// Path to SONAR model directory
+        #[arg(long)]
+        model_dir: Option<String>,
+    },
+
+    /// Embed text into a 1024-dim vector using SONAR
+    SonarEmbed {
+        /// Text to embed
+        text: String,
+        /// Path to SONAR model directory
+        #[arg(long)]
+        model_dir: Option<String>,
+    },
+
+    /// Download model files from HuggingFace
+    Download {
+        /// Model to download: nllb, labse, sonar, or all
+        #[arg(default_value = "all")]
+        model: String,
+    },
+
     /// List all supported languages
     Languages,
+}
+
+/// Prompt user to download a model if running interactively.
+/// Returns true if download should proceed, false if cancelled.
+fn prompt_download(model_name: &str, size_hint: &str) -> bool {
+    if !io::stdin().is_terminal() {
+        eprintln!("Run interactively to auto-download, or use: lingo download {}", model_name);
+        return false;
+    }
+
+    eprint!("Download {} from HuggingFace? ({}) [Y/n] ", model_name, size_hint);
+    io::stderr().flush().ok();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    let input = input.trim().to_lowercase();
+    input.is_empty() || input == "y" || input == "yes"
 }
 
 #[tokio::main]
@@ -98,30 +144,11 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("Location: {}", translator.model_dir().display());
                 eprintln!();
 
-                if io::stdin().is_terminal() {
-                    eprint!("Download from HuggingFace? (~1.2 GB) [Y/n] ");
-                    io::stderr().flush()?;
-
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input)?;
-                    let input = input.trim().to_lowercase();
-
-                    if input.is_empty() || input == "y" || input == "yes" {
-                        eprintln!();
-                        eprintln!("Downloading model files...");
-                        translator.download_model()?;
-                        eprintln!("Download complete.");
-                        eprintln!();
-                    } else {
-                        eprintln!("Download cancelled.");
-                        std::process::exit(1);
-                    }
+                if prompt_download("NLLB-200", "~1.2 GB") {
+                    eprintln!("Downloading model files...");
+                    translator.download_model()?;
+                    eprintln!("Download complete.\n");
                 } else {
-                    eprintln!("Run interactively to auto-download, or download manually:");
-                    eprintln!(
-                        "  python scripts/convert_nllb_safetensors.py --output-dir {}",
-                        translator.model_dir().display()
-                    );
                     std::process::exit(1);
                 }
             }
@@ -160,22 +187,158 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Score { text1, text2, model_dir } => {
             let encoder = LaBSEEncoder::new(model_dir.map(std::path::PathBuf::from))?;
+
             if !encoder.is_model_downloaded() {
-                eprintln!("LaBSE model not found at: {}", encoder.model_dir().display());
-                std::process::exit(1);
+                eprintln!("LaBSE model not found.");
+                eprintln!("Location: {}", encoder.model_dir().display());
+                eprintln!();
+
+                if prompt_download("LaBSE", "~1.8 GB") {
+                    eprintln!("Downloading model files...");
+                    encoder.download_model()?;
+                    eprintln!("Download complete.\n");
+                } else {
+                    std::process::exit(1);
+                }
             }
+
             let score = encoder.score(&text1, &text2).await?;
             println!("{:.4}", score);
         }
 
         Commands::Embed { text, model_dir } => {
             let encoder = LaBSEEncoder::new(model_dir.map(std::path::PathBuf::from))?;
+
             if !encoder.is_model_downloaded() {
-                eprintln!("LaBSE model not found at: {}", encoder.model_dir().display());
-                std::process::exit(1);
+                eprintln!("LaBSE model not found.");
+                eprintln!("Location: {}", encoder.model_dir().display());
+                eprintln!();
+
+                if prompt_download("LaBSE", "~1.8 GB") {
+                    eprintln!("Downloading model files...");
+                    encoder.download_model()?;
+                    eprintln!("Download complete.\n");
+                } else {
+                    std::process::exit(1);
+                }
             }
+
             let embedding = encoder.embed(&text).await?;
             println!("{}", serde_json::to_string(&embedding)?);
+        }
+
+        Commands::SonarScore { text1, text2, model_dir } => {
+            let encoder = SonarEncoder::new(model_dir.map(std::path::PathBuf::from))?;
+
+            if !encoder.is_model_downloaded() {
+                eprintln!("SONAR model not found.");
+                eprintln!("Location: {}", encoder.model_dir().display());
+                eprintln!();
+
+                if prompt_download("SONAR", "requires Python + ~1 GB") {
+                    eprintln!("Converting SONAR model...");
+                    encoder.download_model()?;
+                    eprintln!("Conversion complete.\n");
+                } else {
+                    std::process::exit(1);
+                }
+            }
+
+            let score = encoder.score(&text1, &text2).await?;
+            println!("{:.4}", score);
+        }
+
+        Commands::SonarEmbed { text, model_dir } => {
+            let encoder = SonarEncoder::new(model_dir.map(std::path::PathBuf::from))?;
+
+            if !encoder.is_model_downloaded() {
+                eprintln!("SONAR model not found.");
+                eprintln!("Location: {}", encoder.model_dir().display());
+                eprintln!();
+
+                if prompt_download("SONAR", "requires Python + ~1 GB") {
+                    eprintln!("Converting SONAR model...");
+                    encoder.download_model()?;
+                    eprintln!("Conversion complete.\n");
+                } else {
+                    std::process::exit(1);
+                }
+            }
+
+            let embedding = encoder.embed(&text).await?;
+            println!("{}", serde_json::to_string(&embedding)?);
+        }
+
+        Commands::Download { model } => {
+            match model.to_lowercase().as_str() {
+                "nllb" => {
+                    let translator = NllbTranslator::new(None)?;
+                    if translator.is_model_downloaded() {
+                        eprintln!("NLLB-200 already downloaded at {}", translator.model_dir().display());
+                    } else {
+                        eprintln!("Downloading NLLB-200 (~1.2 GB)...");
+                        translator.download_model()?;
+                        eprintln!("NLLB-200 download complete.");
+                    }
+                }
+                "labse" => {
+                    let encoder = LaBSEEncoder::new(None)?;
+                    if encoder.is_model_downloaded() {
+                        eprintln!("LaBSE already downloaded at {}", encoder.model_dir().display());
+                    } else {
+                        eprintln!("Downloading LaBSE (~1.8 GB)...");
+                        encoder.download_model()?;
+                        eprintln!("LaBSE download complete.");
+                    }
+                }
+                "sonar" => {
+                    let encoder = SonarEncoder::new(None)?;
+                    if encoder.is_model_downloaded() {
+                        eprintln!("SONAR already downloaded at {}", encoder.model_dir().display());
+                    } else {
+                        eprintln!("Downloading/converting SONAR (requires Python)...");
+                        encoder.download_model()?;
+                        eprintln!("SONAR download complete.");
+                    }
+                }
+                "all" => {
+                    // NLLB
+                    let translator = NllbTranslator::new(None)?;
+                    if translator.is_model_downloaded() {
+                        eprintln!("NLLB-200 already downloaded.");
+                    } else {
+                        eprintln!("Downloading NLLB-200 (~1.2 GB)...");
+                        translator.download_model()?;
+                        eprintln!("NLLB-200 download complete.\n");
+                    }
+
+                    // LaBSE
+                    let encoder = LaBSEEncoder::new(None)?;
+                    if encoder.is_model_downloaded() {
+                        eprintln!("LaBSE already downloaded.");
+                    } else {
+                        eprintln!("Downloading LaBSE (~1.8 GB)...");
+                        encoder.download_model()?;
+                        eprintln!("LaBSE download complete.\n");
+                    }
+
+                    // SONAR
+                    let sonar = SonarEncoder::new(None)?;
+                    if sonar.is_model_downloaded() {
+                        eprintln!("SONAR already downloaded.");
+                    } else {
+                        eprintln!("Downloading/converting SONAR (requires Python)...");
+                        sonar.download_model()?;
+                        eprintln!("SONAR download complete.\n");
+                    }
+
+                    eprintln!("All models ready.");
+                }
+                other => {
+                    eprintln!("Unknown model: '{}'. Use: nllb, labse, sonar, or all", other);
+                    std::process::exit(1);
+                }
+            }
         }
 
         Commands::Languages => {

@@ -340,6 +340,16 @@ impl SonarEncoder {
             && self.model_dir.join("tokenizer.json").exists()
     }
 
+    /// Download and convert the SONAR text encoder to safetensors.
+    ///
+    /// Runs the bundled Python conversion script which downloads the model
+    /// from HuggingFace and converts fairseq2 weights to safetensors format.
+    /// Requires Python 3 with `torch`, `safetensors`, and `huggingface_hub`.
+    #[cfg(feature = "download")]
+    pub fn download_model(&self) -> Result<()> {
+        crate::download::download_sonar(&self.model_dir)
+    }
+
     /// Load the model. Called automatically on first use.
     pub async fn load(&self) -> Result<()> {
         let mut model_guard = self.model.lock().await;
@@ -369,7 +379,7 @@ impl SonarEncoder {
         let m = SonarModel::load(vb, &cfg)
             .map_err(|e| Error::Inference(format!("Failed to build SONAR model: {}", e)))?;
 
-        let device_name = if matches!(self.device, Device::Cpu) { "CPU" } else { "Metal GPU" };
+        let device_name = format!("{:?}", self.device);
         info!("SONAR loaded on {} (24 layers, 1024 dim)", device_name);
 
         *model_guard = Some(m);

@@ -450,6 +450,15 @@ impl LaBSEEncoder {
             && self.model_dir.join("config.json").exists()
     }
 
+    /// Download LaBSE from HuggingFace Hub to the model directory.
+    ///
+    /// Downloads `model.safetensors` (~1.8 GB), `config.json`, `tokenizer.json`,
+    /// and `2_Dense/model.safetensors`. Requires the `download` feature.
+    #[cfg(feature = "download")]
+    pub fn download_model(&self) -> Result<()> {
+        crate::download::download_labse(&self.model_dir)
+    }
+
     /// Load the model. Called automatically on first use.
     pub async fn load(&self) -> Result<()> {
         let mut model_guard = self.model.lock().await;
