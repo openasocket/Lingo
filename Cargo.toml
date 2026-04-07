@@ -30,6 +30,10 @@ name = "similarity"
 path = "examples/similarity.rs"
 
 [[example]]
+name = "benchmark"
+path = "examples/benchmark.rs"
+
+[[example]]
 name = "server"
 path = "examples/server.rs"
 required-features = ["server"]

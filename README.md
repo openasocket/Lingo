@@ -190,6 +190,13 @@ Download from [sentence-transformers/LaBSE](https://huggingface.co/sentence-tran
   2_Dense/model.safetensors # Projection layer
 ```
 
+### SONAR (similarity/embeddings)
+
+```bash
+python scripts/convert_sonar_safetensors.py
+# Downloads from Meta's CDN and saves to ~/.cache/lingo/sonar/ (~3 GB)
+```
+
 ## Feature Flags
 
 | Feature | Description |
@@ -217,7 +224,7 @@ LINGO_ACCEPT_LICENSE=1 ./target/release/lingo translate "Hello world" --to fr
 
 ## Performance
 
-All benchmarks are release builds (`cargo build --release`), measuring warm inference (model already loaded) unless noted otherwise. NLLB uses F16 weights via conversion script; LaBSE uses F32 weights.
+All benchmarks are release builds (`cargo build --release`), measuring warm inference (model already loaded) unless noted otherwise. NLLB uses F16 weights via conversion script; LaBSE uses F32 weights; SONAR uses F32 weights.
 
 ### NVIDIA RTX 5090 — CUDA 13.0
 
@@ -250,6 +257,9 @@ All benchmarks are release builds (`cargo build --release`), measuring warm infe
 | LaBSE similarity (per pair) | ~100ms | Custom BERT encoder |
 | LaBSE model load | ~385ms | |
 | LaBSE cold start (load + first score) | ~500ms | |
+| SONAR similarity (per pair) | ~28ms | 24-layer transformer encoder |
+| SONAR model load | ~449ms | F32 weights |
+| SONAR cold start (load + first score) | ~501ms | |
 
 ### Apple M5 Max — Accelerate (CPU SIMD)
 
@@ -266,6 +276,9 @@ All benchmarks are release builds (`cargo build --release`), measuring warm infe
 | LaBSE similarity (per pair) | ~55ms | Faster than Metal for BERT inference |
 | LaBSE model load | ~395ms | |
 | LaBSE cold start (load + first score) | ~450ms | |
+| SONAR similarity (per pair) | ~73ms | 24-layer transformer encoder |
+| SONAR model load | ~408ms | F32 weights |
+| SONAR cold start (load + first score) | ~522ms | |
 
 ### Cross-Lingual Similarity Scores (LaBSE)
 
@@ -277,6 +290,18 @@ Scores are cosine similarity of L2-normalized 768-dim embeddings. Identical on C
 | "Hello world" | "Hola mundo" (es) | 0.957 |
 | "Hello world" | "こんにちは世界" (ja) | 0.948 |
 | "The cat sat on the mat" | "The dog ran in the park" | 0.517 |
+| "I love programming" | "I love programming" | 1.000 |
+
+### Cross-Lingual Similarity Scores (SONAR)
+
+Scores are cosine similarity of L2-normalized 1024-dim embeddings. Identical on CPU and GPU.
+
+| Text 1 | Text 2 | Score |
+|--------|--------|-------|
+| "Hello world" | "Bonjour le monde" (fr) | 0.744 |
+| "Hello world" | "Hola mundo" (es) | 0.753 |
+| "Hello world" | "こんにちは世界" (ja) | 0.699 |
+| "The cat sat on the mat" | "The dog ran in the park" | 0.168 |
 | "I love programming" | "I love programming" | 1.000 |
 
 ## License
