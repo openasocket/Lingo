@@ -251,6 +251,22 @@ All benchmarks are release builds (`cargo build --release`), measuring warm infe
 | LaBSE model load | ~385ms | |
 | LaBSE cold start (load + first score) | ~500ms | |
 
+### Apple M5 Max — Accelerate (CPU SIMD)
+
+**System**: MacBook Pro, M5 Max, 128 GB unified memory, macOS 26.4
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| NLLB translation (short, warm) | ~225ms | Cached encoder, subsequent targets |
+| NLLB translation (short, cold) | ~399ms | First target in invocation |
+| NLLB translation (paragraph, 3 targets) | ~2.7s avg | 40-word input |
+| NLLB multi-target (10 languages) | ~2.56s total | Single invocation |
+| NLLB model load | ~630ms | F16 weights |
+| NLLB cold start (load + first translate) | ~1.31s | |
+| LaBSE similarity (per pair) | ~55ms | Faster than Metal for BERT inference |
+| LaBSE model load | ~395ms | |
+| LaBSE cold start (load + first score) | ~450ms | |
+
 ### Cross-Lingual Similarity Scores (LaBSE)
 
 Scores are cosine similarity of L2-normalized 768-dim embeddings. Identical on CPU and CUDA.
