@@ -156,6 +156,8 @@ cargo run --example server --features server,metal
 | POST | `/score` | `{"text1", "text2"}` -> similarity score |
 | POST | `/embed` | `{"text"}` -> 768-dim embedding |
 | POST | `/embed_batch` | `{"texts": [...]}` -> batch embeddings |
+| POST | `/analyze` | `{"text", "source", "target"}` -> translation + LaBSE & SONAR scores |
+| POST | `/analyze_batch` | `{"texts": [...], "source", "target"}` -> batch translate + score |
 | GET | `/health` | Server status |
 
 ```bash
@@ -170,6 +172,15 @@ curl -X POST http://localhost:3000/score \
 curl -X POST http://localhost:3000/embed_batch \
   -H "Content-Type: application/json" \
   -d '{"texts": ["Hello world", "Bonjour le monde", "Hola mundo"]}'
+
+curl -X POST http://localhost:3000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world", "source": "en", "target": "fr"}'
+# {"source_text":"Hello world","translation":"Bonjour le monde","labse_score":0.947,"sonar_score":0.744,...}
+
+curl -X POST http://localhost:3000/analyze_batch \
+  -H "Content-Type: application/json" \
+  -d '{"texts": ["Hello world", "Good morning"], "source": "en", "target": "fr"}'
 ```
 
 ## Use from Python
@@ -197,11 +208,28 @@ def embed_batch(texts):
         headers={"Content-Type": "application/json"})
     return json.loads(urllib.request.urlopen(req).read())
 
+def analyze(text, source="en", target="fr"):
+    data = json.dumps({"text": text, "source": source, "target": target}).encode()
+    req = urllib.request.Request("http://localhost:3000/analyze", data=data,
+        headers={"Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req).read())
+
+def analyze_batch(texts, source="en", target="fr"):
+    data = json.dumps({"texts": texts, "source": source, "target": target}).encode()
+    req = urllib.request.Request("http://localhost:3000/analyze_batch", data=data,
+        headers={"Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req).read())
+
 print(translate("Hello", "en", "fr")["translation"])  # "Bonjour"
 print(score("Hello", "Bonjour")["score"])              # 0.85
 
 embeddings = embed_batch(["Hello", "Bonjour", "Hola"])
 print(len(embeddings["embeddings"]))  # 3
+
+result = analyze("Hello world", "en", "fr")
+print(result["translation"])   # "Bonjour le monde"
+print(result["labse_score"])   # 0.947
+print(result["sonar_score"])   # 0.744
 print(embeddings["dimensions"])       # 768
 ```
 
