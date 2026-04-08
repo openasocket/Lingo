@@ -155,6 +155,7 @@ cargo run --example server --features server,metal
 | POST | `/translate` | `{"text", "source", "target"}` -> translation |
 | POST | `/score` | `{"text1", "text2"}` -> similarity score |
 | POST | `/embed` | `{"text"}` -> 768-dim embedding |
+| POST | `/embed_batch` | `{"texts": [...]}` -> batch embeddings |
 | GET | `/health` | Server status |
 
 ```bash
@@ -165,6 +166,10 @@ curl -X POST http://localhost:3000/translate \
 curl -X POST http://localhost:3000/score \
   -H "Content-Type: application/json" \
   -d '{"text1": "Hello world", "text2": "Bonjour le monde"}'
+
+curl -X POST http://localhost:3000/embed_batch \
+  -H "Content-Type: application/json" \
+  -d '{"texts": ["Hello world", "Bonjour le monde", "Hola mundo"]}'
 ```
 
 ## Use from Python
@@ -186,8 +191,18 @@ def score(text1, text2):
         headers={"Content-Type": "application/json"})
     return json.loads(urllib.request.urlopen(req).read())
 
+def embed_batch(texts):
+    data = json.dumps({"texts": texts}).encode()
+    req = urllib.request.Request("http://localhost:3000/embed_batch", data=data,
+        headers={"Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req).read())
+
 print(translate("Hello", "en", "fr")["translation"])  # "Bonjour"
 print(score("Hello", "Bonjour")["score"])              # 0.85
+
+embeddings = embed_batch(["Hello", "Bonjour", "Hola"])
+print(len(embeddings["embeddings"]))  # 3
+print(embeddings["dimensions"])       # 768
 ```
 
 ## Model Setup

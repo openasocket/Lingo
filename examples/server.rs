@@ -5,10 +5,11 @@
 //! ```
 //!
 //! Endpoints:
-//!   POST /translate  — translate text
-//!   POST /score      — score similarity between two texts
-//!   POST /embed      — get 768-dim embedding for text
-//!   GET  /health     — server health check
+//!   POST /translate    — translate text
+//!   POST /score        — score similarity between two texts
+//!   POST /embed        — get 768-dim embedding for text
+//!   POST /embed_batch  — get embeddings for multiple texts
+//!   GET  /health       — server health check
 
 use axum::{
     extract::State,
@@ -34,6 +35,11 @@ struct ScoreResponse { score: f32, duration_ms: u64 }
 struct EmbedRequest { text: String }
 #[derive(Serialize)]
 struct EmbedResponse { embedding: Vec<f32>, dimensions: usize }
+
+#[derive(Deserialize)]
+struct EmbedBatchRequest { texts: Vec<String> }
+#[derive(Serialize)]
+struct EmbedBatchResponse { embeddings: Vec<Vec<f32>>, dimensions: usize, count: usize }
 
 #[derive(Serialize)]
 struct ErrorResponse { error: String }
@@ -87,6 +93,24 @@ async fn embed(
     }
 }
 
+async fn embed_batch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EmbedBatchRequest>,
+) -> std::result::Result<Json<EmbedBatchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if req.texts.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "texts array must not be empty".into() })));
+    }
+    let text_refs: Vec<&str> = req.texts.iter().map(|s| s.as_str()).collect();
+    match state.encoder.embed_batch(&text_refs).await {
+        Ok(embeddings) => {
+            let dims = embeddings.first().map_or(0, |e| e.len());
+            let count = embeddings.len();
+            Ok(Json(EmbedBatchResponse { embeddings, dimensions: dims, count }))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("lingo=info,tower_http=debug").init();
@@ -106,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/translate", post(translate))
         .route("/score", post(score))
         .route("/embed", post(embed))
+        .route("/embed_batch", post(embed_batch))
         .with_state(state);
 
     println!("\nServer on http://localhost:3000");
