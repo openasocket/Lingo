@@ -35,30 +35,36 @@ Derivative works, modifications, wrappers, and redistributions remain subject to
 
 No recipient may directly or indirectly distribute, sublicense, host, embed, disclose, demonstrate, benchmark for, or otherwise provide the Software, any protected derivative work, hosted access to the Software, or any non-public benchmark, model-training artifact, or analysis materially derived from the Software in a manner intended to enable, assist, or reasonably expected to assist a forbidden party, or any person acting on its behalf, to obtain the practical benefit of the licensed material. No recipient may avoid these restrictions through an intermediary, former employee, current employee, contractor, consultant, educator, recruiter, agent, or other third party. If a recipient redistributes the Software or a protected derivative work, the recipient must preserve this license text, preserve the reference to Schedule A, and provide downstream recipients with notice that the Software is offered on a restricted-use source-available basis. Recipients engaged in redistribution, hosted access, or enterprise deployment should maintain reasonable records showing that they are not knowingly providing the Software, protected derivative works, or materially derived non-public artifacts for or on behalf of a forbidden party, and must provide explanatory information upon reasonable written request from the Licensor.
 
-## 8. Exceptions
+## 8. Export Controls and Sanctions Compliance
+
+Recipients must comply with applicable export-control and economic-sanctions laws in connection with the Software, any protected derivative work, and any related transfer, access, hosting, download, re-export, or other provision. No recipient may export, re-export, transfer, make available, or use the Software in any manner that would violate applicable sanctions or export-control law.
+
+This license does not reproduce or restate any OFAC-administered sanctions lists or country-program lists. For current official sanctions screening and program information, recipients should consult OFAC's maintained resources, including the Sanctions List Service at **https://ofac.treasury.gov/ofac-sanctions-lists** and the Sanctions Programs and Country Information page at **https://ofac.treasury.gov/sanctions-programs-and-country-information**. Recipients remain responsible for determining whether a person, entity, country, transaction, or end use is restricted under applicable law, including restrictions that may apply even where a name does not appear verbatim on a published list.
+
+## 9. Exceptions
 
 The Licensor may approve a case-specific written exception. Any exception must be signed or otherwise issued in writing by legal@fyc.llc, must identify the named recipient or class of recipients, and must state the covered acts, material, forbidden-party designation override if any, and the effective duration. Unless the exception says otherwise, it is revocable on written notice, does not waive future enforcement, and does not authorize conduct outside the expressly stated scope. A later written exception or reinstatement notice supersedes an earlier one only to the extent the later writing says so.
 
-## 9. Termination
+## 10. Termination
 
-Any violation of the grant, scope, prohibited-party, or downstream-distribution restrictions in this license automatically terminates the affected recipient's rights under this license as to the violating conduct unless the Licensor restores rights or grants a written exception in writing. Termination under this section does not expand the Licensor's rights beyond applicable law, and contract-only obligations, if any, remain subject to applicable non-copyright remedies.
+Any violation of the grant, scope, prohibited-party, downstream-distribution, or export-controls-and-sanctions restrictions in this license automatically terminates the affected recipient's rights under this license as to the violating conduct unless the Licensor restores rights or grants a written exception in writing. Termination under this section does not expand the Licensor's rights beyond applicable law, and contract-only obligations, if any, remain subject to applicable non-copyright remedies.
 
-## 10. Disclaimer
+## 11. Disclaimer
 
 The Software is provided "as is," without warranties or conditions of any kind, express or implied, to the maximum extent permitted by applicable law. Nothing in this section is intended to exclude non-waivable rights or remedies that cannot be disclaimed under applicable law.
 
-## 11. Interpretation and Publication Limits
+## 12. Interpretation and Publication Limits
 
 This license should be interpreted consistently with applicable copyright law, mandatory software-law limitations, and the project research posture reflected in the policy matrix. It does not purport to restrict ideas, principles, interfaces, generalized know-how, security research conducted without copying protected expression, or independent implementations except to the extent protected expression is actually copied. Governing law, venue, severability language, consumer-law carveouts, export controls, and repository-specific notice mechanics remain subject to jurisdiction-specific review for each publication context.
 
-## 12. Addendum: Integrated Schedule A
+## 13. Addendum: Integrated Schedule A
 
 The following Schedule A is incorporated into this license for single-file distribution convenience. Any separately published copy of Schedule A for the same package version should remain synchronized with this integrated copy.
 
 ### Schedule A: Forbidden Entities
 
 Project: **lingo**
-Schedule version: **2026-04-07-lingo-initial**
+Schedule version: **2026-05-04-lingo-ofac-update**
 Maintained by: **FYC Team legal and release manager**
 This schedule lists entities that fall within the restricted-party concept for the current license package.
 
