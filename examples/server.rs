@@ -5,13 +5,14 @@
 //! ```
 //!
 //! Endpoints:
-//!   POST /translate      — translate text
-//!   POST /score          — score similarity between two texts
-//!   POST /embed          — get 768-dim embedding for text
-//!   POST /embed_batch    — get embeddings for multiple texts
-//!   POST /analyze        — translate + LaBSE & SONAR scores in one call
-//!   POST /analyze_batch  — batch translate + score
-//!   GET  /health         — server health check
+//!   POST /translate       — translate text
+//!   POST /translate_batch — translate many texts (pure translation, no scoring)
+//!   POST /score           — score similarity between two texts
+//!   POST /embed           — get 768-dim embedding for text
+//!   POST /embed_batch     — get embeddings for multiple texts
+//!   POST /analyze         — translate + LaBSE & SONAR scores in one call
+//!   POST /analyze_batch   — batch translate + score
+//!   GET  /health          — server health check
 
 use axum::{
     extract::State,
@@ -42,6 +43,17 @@ struct EmbedResponse { embedding: Vec<f32>, dimensions: usize }
 struct EmbedBatchRequest { texts: Vec<String> }
 #[derive(Serialize)]
 struct EmbedBatchResponse { embeddings: Vec<Vec<f32>>, dimensions: usize, count: usize }
+
+#[derive(Deserialize)]
+struct TranslateBatchRequest { texts: Vec<String>, source: String, target: String }
+#[derive(Serialize)]
+struct TranslateBatchResponse {
+    translations: Vec<String>,
+    count: usize,
+    source_lang: String,
+    target_lang: String,
+    total_duration_ms: u64,
+}
 
 #[derive(Deserialize)]
 struct AnalyzeRequest { text: String, source: String, target: String }
@@ -132,6 +144,31 @@ async fn embed_batch(
     }
 }
 
+async fn translate_batch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TranslateBatchRequest>,
+) -> std::result::Result<Json<TranslateBatchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if req.texts.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "texts array must not be empty".into() })));
+    }
+    let start = std::time::Instant::now();
+    let mut translations = Vec::with_capacity(req.texts.len());
+    for text in &req.texts {
+        match state.translator.translate(text, &req.source, &req.target).await {
+            Ok(r) => translations.push(r.text),
+            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))),
+        }
+    }
+    let count = translations.len();
+    Ok(Json(TranslateBatchResponse {
+        translations,
+        count,
+        source_lang: req.source,
+        target_lang: req.target,
+        total_duration_ms: start.elapsed().as_millis() as u64,
+    }))
+}
+
 async fn analyze(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AnalyzeRequest>,
@@ -209,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/translate", post(translate))
+        .route("/translate_batch", post(translate_batch))
         .route("/score", post(score))
         .route("/embed", post(embed))
         .route("/embed_batch", post(embed_batch))

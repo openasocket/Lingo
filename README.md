@@ -153,6 +153,7 @@ cargo run --example server --features server,metal
 | Method | Path | Description |
 |---|---|---|
 | POST | `/translate` | `{"text", "source", "target"}` -> translation |
+| POST | `/translate_batch` | `{"texts": [...], "source", "target"}` -> batch translation, no scoring |
 | POST | `/score` | `{"text1", "text2"}` -> similarity score |
 | POST | `/embed` | `{"text"}` -> 768-dim embedding |
 | POST | `/embed_batch` | `{"texts": [...]}` -> batch embeddings |
@@ -168,6 +169,11 @@ curl -X POST http://localhost:3000/translate \
 curl -X POST http://localhost:3000/score \
   -H "Content-Type: application/json" \
   -d '{"text1": "Hello world", "text2": "Bonjour le monde"}'
+
+curl -X POST http://localhost:3000/translate_batch \
+  -H "Content-Type: application/json" \
+  -d '{"texts": ["Hello world", "Good morning", "How are you"], "source": "en", "target": "fr"}'
+# {"translations":["Bonjour le monde","Bonjour","Comment allez-vous"],"count":3,...}
 
 curl -X POST http://localhost:3000/embed_batch \
   -H "Content-Type: application/json" \

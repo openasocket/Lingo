@@ -173,6 +173,7 @@ Endpoints (source: `examples/server.rs`):
 |---|---|---|---|
 | GET | `/health` | — | `{status, nllb_loaded, labse_loaded, sonar_loaded}` |
 | POST | `/translate` | `{text, source, target}` | `{translation, source_lang, target_lang, duration_ms}` |
+| POST | `/translate_batch` | `{texts: [...], source, target}` | `{translations: [...], count, source_lang, target_lang, total_duration_ms}` — pure translation, skips LaBSE/SONAR for throughput on deep queues |
 | POST | `/score` | `{text1, text2}` | `{score, duration_ms}` (LaBSE) |
 | POST | `/embed` | `{text}` | `{embedding, dimensions}` (LaBSE, 768-dim) |
 | POST | `/embed_batch` | `{texts: [...]}` | `{embeddings, dimensions, count}` |
