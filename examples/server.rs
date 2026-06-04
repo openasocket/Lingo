@@ -13,6 +13,14 @@
 //!   POST /analyze         — translate + LaBSE & SONAR scores in one call
 //!   POST /analyze_batch   — batch translate + score
 //!   GET  /health          — server health check
+//!
+//! Translation-bearing responses include chunk metadata so clients can see
+//! when long input was split across multiple NLLB passes: single-result
+//! responses (`/translate`, `/analyze`, and each entry of `/analyze_batch`)
+//! carry a `chunk_count` field, and `/translate_batch` carries a parallel
+//! `chunk_counts` array aligned position-wise with `translations`. A value
+//! of 1 means the input fit in a single pass; greater than 1 means it was
+//! chunked.
 
 use axum::{
     extract::State,
@@ -27,7 +35,7 @@ use std::sync::Arc;
 #[derive(Deserialize)]
 struct TranslateRequest { text: String, source: String, target: String }
 #[derive(Serialize)]
-struct TranslateResponse { translation: String, source_lang: String, target_lang: String, duration_ms: u64 }
+struct TranslateResponse { translation: String, source_lang: String, target_lang: String, duration_ms: u64, chunk_count: usize }
 
 #[derive(Deserialize)]
 struct ScoreRequest { text1: String, text2: String }
@@ -49,6 +57,7 @@ struct TranslateBatchRequest { texts: Vec<String>, source: String, target: Strin
 #[derive(Serialize)]
 struct TranslateBatchResponse {
     translations: Vec<String>,
+    chunk_counts: Vec<usize>,
     count: usize,
     source_lang: String,
     target_lang: String,
@@ -66,6 +75,7 @@ struct AnalyzeResponse {
     labse_score: f32,
     sonar_score: f32,
     duration_ms: u64,
+    chunk_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +107,7 @@ async fn translate(
         Ok(r) => Ok(Json(TranslateResponse {
             translation: r.text, source_lang: r.source_lang,
             target_lang: r.target_lang, duration_ms: r.duration_ms,
+            chunk_count: r.chunk_count,
         })),
         Err(e) => Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e.to_string() }))),
     }
@@ -153,15 +164,17 @@ async fn translate_batch(
     }
     let start = std::time::Instant::now();
     let mut translations = Vec::with_capacity(req.texts.len());
+    let mut chunk_counts = Vec::with_capacity(req.texts.len());
     for text in &req.texts {
         match state.translator.translate(text, &req.source, &req.target).await {
-            Ok(r) => translations.push(r.text),
+            Ok(r) => { translations.push(r.text); chunk_counts.push(r.chunk_count); }
             Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))),
         }
     }
     let count = translations.len();
     Ok(Json(TranslateBatchResponse {
         translations,
+        chunk_counts,
         count,
         source_lang: req.source,
         target_lang: req.target,
@@ -188,6 +201,7 @@ async fn analyze(
         labse_score,
         sonar_score,
         duration_ms: start.elapsed().as_millis() as u64,
+        chunk_count: translation.chunk_count,
     }))
 }
 
@@ -216,6 +230,7 @@ async fn analyze_batch(
             labse_score,
             sonar_score,
             duration_ms: item_start.elapsed().as_millis() as u64,
+            chunk_count: translation.chunk_count,
         });
     }
     let count = results.len();
