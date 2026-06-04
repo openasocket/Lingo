@@ -172,13 +172,13 @@ Endpoints (source: `examples/server.rs`):
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | GET | `/health` | — | `{status, nllb_loaded, labse_loaded, sonar_loaded}` |
-| POST | `/translate` | `{text, source, target}` | `{translation, source_lang, target_lang, duration_ms}` |
-| POST | `/translate_batch` | `{texts: [...], source, target}` | `{translations: [...], count, source_lang, target_lang, total_duration_ms}` — pure translation, skips LaBSE/SONAR for throughput on deep queues |
+| POST | `/translate` | `{text, source, target}` | `{translation, source_lang, target_lang, duration_ms, chunk_count}` |
+| POST | `/translate_batch` | `{texts: [...], source, target}` | `{translations: [...], chunk_counts: [...], count, source_lang, target_lang, total_duration_ms}` — pure translation, skips LaBSE/SONAR for throughput on deep queues; `chunk_counts[i]` aligns with `translations[i]`, `>1` means input `i` was split |
 | POST | `/score` | `{text1, text2}` | `{score, duration_ms}` (LaBSE) |
 | POST | `/embed` | `{text}` | `{embedding, dimensions}` (LaBSE, 768-dim) |
 | POST | `/embed_batch` | `{texts: [...]}` | `{embeddings, dimensions, count}` |
-| POST | `/analyze` | `{text, source, target}` | translation + LaBSE *and* SONAR scores |
-| POST | `/analyze_batch` | `{texts: [...], source, target}` | batched `/analyze` |
+| POST | `/analyze` | `{text, source, target}` | translation + LaBSE *and* SONAR scores, plus `chunk_count` |
+| POST | `/analyze_batch` | `{texts: [...], source, target}` | batched `/analyze`; each `results[i]` carries its own `chunk_count` |
 
 The server loads all three models at startup; missing models are logged but
 don't crash boot — endpoints touching a missing model will 4xx.

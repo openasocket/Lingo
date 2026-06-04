@@ -30,6 +30,7 @@ let translator = NllbTranslator::new(None)?;
 let result = translator.translate("Hello, how are you?", "en", "fr").await?;
 println!("{}", result.text);       // "Bonjour, comment allez-vous ?"
 println!("{}ms", result.duration_ms); // ~130ms
+println!("{} chunks", result.chunk_count); // 1 for short input, >1 for chunked
 ```
 
 ### Similarity Scoring (LaBSE)
