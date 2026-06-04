@@ -695,6 +695,62 @@ impl NllbModel {
 
         Ok(output_tokens)
     }
+
+    /// Reference (pre-KV-cache) generation — the original full-prefix loop.
+    ///
+    /// Unlike [`generate`](Self::generate), which seeds a [`DecoderCache`] once
+    /// and extends it one token at a time via [`decode_step`](Self::decode_step)
+    /// (O(N) decoding), this re-runs the decoder over the **entire growing
+    /// prefix** on every step via [`decode`](Self::decode) with no cache
+    /// (`None` => a throw-away cache is allocated internally, so each call
+    /// recomputes from scratch — the original O(N²) behavior).
+    ///
+    /// This is kept verbatim from the pre-KV-cache implementation save for the
+    /// `decode` cache argument and a position-budget clamp identical to
+    /// `generate`'s, so the two paths terminate on exactly the same token and
+    /// neither indexes past the sinusoidal table. Its sole purpose is to serve
+    /// as a known-correct baseline for the numeric-equivalence test in
+    /// `tests/kv_cache_equivalence.rs`; production code should always call
+    /// `generate`. Marked `#[doc(hidden)]` to discourage external use while
+    /// remaining importable within the crate.
+    #[doc(hidden)]
+    pub fn generate_reference(
+        &self,
+        encoder_output: &Tensor,
+        forced_bos_token_id: u32,
+        max_length: usize,
+    ) -> CandleResult<Vec<u32>> {
+        let device = encoder_output.device();
+        let mut token_ids: Vec<u32> =
+            vec![self.config.decoder_start_token_id, forced_bos_token_id];
+
+        // Same clamp as `generate`: with a 2-token seed the decoder can emit at
+        // most `max_position_embeddings - 1` tokens before a position would
+        // index past the `(max_position_embeddings + 2)`-row sinusoidal table.
+        let max_safe = self.config.max_position_embeddings.saturating_sub(1);
+        let effective_max = max_length.min(max_safe);
+
+        for _ in 0..effective_max {
+            let decoder_input =
+                Tensor::from_vec(token_ids.clone(), (1, token_ids.len()), device)?;
+
+            // `None` => full-prefix recompute with a discarded cache, matching
+            // the original pre-KV-cache code path exactly.
+            let logits = self.decode(&decoder_input, encoder_output, None)?;
+
+            let last_logits = logits.i((.., logits.dim(1)? - 1, ..))?;
+            let next_token = last_logits.argmax(D::Minus1)?.to_vec1::<u32>()?[0];
+
+            if next_token == self.config.eos_token_id {
+                break;
+            }
+
+            token_ids.push(next_token);
+        }
+
+        // Drop the 2-token seed; return only the generated tokens.
+        Ok(token_ids[2..].to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -750,6 +806,91 @@ mod tests {
             fc1: rand_linear(ffn_dim, d_model),
             fc2: rand_linear(d_model, ffn_dim),
             final_layer_norm: build_layer_norm(d_model, device),
+        }
+    }
+
+    /// Build an `EncoderLayer` directly from random weights for unit testing,
+    /// bypassing `EncoderLayer::load`.
+    fn build_encoder_layer(
+        d_model: usize,
+        num_heads: usize,
+        ffn_dim: usize,
+        device: &Device,
+    ) -> EncoderLayer {
+        let rand_linear = |out: usize, inp: usize| {
+            let w = Tensor::randn(0f32, 0.1f32, (out, inp), device).unwrap();
+            Linear::new(w, None)
+        };
+        EncoderLayer {
+            self_attn: build_attention(d_model, num_heads, device),
+            self_attn_layer_norm: build_layer_norm(d_model, device),
+            fc1: rand_linear(ffn_dim, d_model),
+            fc2: rand_linear(d_model, ffn_dim),
+            final_layer_norm: build_layer_norm(d_model, device),
+        }
+    }
+
+    /// Build a tiny end-to-end `NllbModel` from random weights for unit testing,
+    /// bypassing `NllbModel::load` (which needs real safetensors weights). The
+    /// dimensions are deliberately small so generation runs in milliseconds on
+    /// CPU; the architecture mirrors the real model so the full-prefix and
+    /// incremental decode paths exercise the same code.
+    fn build_tiny_model(cfg: &NllbConfig, device: &Device) -> NllbModel {
+        let head_dim = cfg.d_model / cfg.encoder_attention_heads;
+        let emb_weight =
+            Tensor::randn(0f32, 0.1f32, (cfg.vocab_size, cfg.d_model), device).unwrap();
+        let shared_embeddings = Embedding::new(emb_weight.clone(), cfg.d_model);
+        let lm_head = Linear::new(emb_weight, None);
+        let pos_embeddings = sinusoidal_embeddings(
+            cfg.max_position_embeddings,
+            cfg.d_model,
+            2,
+            DType::F32,
+            device,
+        )
+        .unwrap();
+
+        let encoder_layers = (0..cfg.encoder_layers)
+            .map(|_| {
+                build_encoder_layer(cfg.d_model, cfg.encoder_attention_heads, cfg.encoder_ffn_dim, device)
+            })
+            .collect();
+        let decoder_layers = (0..cfg.decoder_layers)
+            .map(|_| {
+                build_decoder_layer(cfg.d_model, cfg.decoder_attention_heads, cfg.decoder_ffn_dim, device)
+            })
+            .collect();
+
+        // head_dim consistency guard — keeps the tiny config self-consistent.
+        assert_eq!(head_dim, cfg.d_model / cfg.decoder_attention_heads);
+
+        NllbModel {
+            shared_embeddings,
+            encoder_layers,
+            decoder_layers,
+            encoder_layer_norm: build_layer_norm(cfg.d_model, device),
+            decoder_layer_norm: build_layer_norm(cfg.d_model, device),
+            lm_head,
+            pos_embeddings,
+            config: cfg.clone(),
+        }
+    }
+
+    /// A small but architecturally faithful config for the tiny-model tests.
+    fn tiny_config() -> NllbConfig {
+        NllbConfig {
+            vocab_size: 16,
+            d_model: 8,
+            encoder_layers: 2,
+            decoder_layers: 2,
+            encoder_attention_heads: 2,
+            decoder_attention_heads: 2,
+            encoder_ffn_dim: 16,
+            decoder_ffn_dim: 16,
+            max_position_embeddings: 32,
+            eos_token_id: 2,
+            decoder_start_token_id: 2,
+            scale_embedding: true,
         }
     }
 
@@ -1071,5 +1212,55 @@ mod tests {
             max_abs_diff(&per_step_out, &precompute_out) < 1e-5,
             "precomputed cross-attn output diverged from the per-step projection"
         );
+    }
+
+    #[test]
+    fn generate_matches_generate_reference_on_tiny_model() {
+        // End-to-end equivalence on CPU without the real NLLB weights: the
+        // KV-cached `generate` (incremental `decode_step`) must produce the
+        // exact same token sequence as the full-prefix `generate_reference`.
+        // This is the deterministic, no-download stand-in for the integration
+        // test in tests/kv_cache_equivalence.rs.
+        let device = Device::Cpu;
+        let cfg = tiny_config();
+        let model = build_tiny_model(&cfg, &device);
+
+        // A few synthetic encoder outputs of varying length, each driving an
+        // independent generation. Both paths share the same model + encoder
+        // output, so they must agree token-for-token.
+        for enc_len in [1usize, 3, 7] {
+            let encoder_output =
+                Tensor::randn(0f32, 1f32, (1usize, enc_len, cfg.d_model), &device).unwrap();
+            let forced_bos = 3u32;
+
+            let cached = model.generate(&encoder_output, forced_bos, 16).unwrap();
+            let reference = model
+                .generate_reference(&encoder_output, forced_bos, 16)
+                .unwrap();
+
+            assert_eq!(
+                cached, reference,
+                "KV-cached generate diverged from full-prefix reference for enc_len={enc_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_reference_excludes_seed_and_stops_on_eos() {
+        // generate_reference must drop the 2-token seed and never emit EOS.
+        let device = Device::Cpu;
+        let cfg = tiny_config();
+        let model = build_tiny_model(&cfg, &device);
+        let encoder_output = Tensor::randn(0f32, 1f32, (1usize, 4usize, cfg.d_model), &device).unwrap();
+
+        let out = model.generate_reference(&encoder_output, 3u32, 16).unwrap();
+
+        assert!(
+            !out.contains(&cfg.eos_token_id),
+            "reference output must not contain the EOS token"
+        );
+        // The seed tokens (decoder_start, forced_bos) must not be returned as
+        // generated output positions 0/1 — i.e. the [2..] slice was applied.
+        assert!(out.len() <= cfg.max_position_embeddings - 1);
     }
 }

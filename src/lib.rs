@@ -64,11 +64,18 @@ use tracing::info;
 
 const TRANSLATION_CACHE_MAX: usize = 1024;
 
-/// Maximum input tokens fed to the encoder in a single pass. NLLB's
-/// `max_position_embeddings` is 1024; 960 leaves headroom for the BOS/EOS and
-/// language-tag overhead while staying safely under that hard limit. Inputs
-/// that tokenize beyond this are split by the chunker and translated piecewise.
-const MAX_INPUT_TOKENS: usize = 960;
+/// Maximum input tokens fed to the encoder in a single pass.
+///
+/// NLLB's `max_position_embeddings` is 1024 on both encoder and decoder. The
+/// encoder side has headroom at 960 input tokens, but the *decoder* expands
+/// output by up to ~2.5x for verbose target languages (German compounds,
+/// Japanese kana, Spanish articles), so 960 input can produce ~2400 output
+/// tokens — well past the decoder's 1024 ceiling, causing silent truncation.
+///
+/// Set to 400 to match `ChunkerConfig::default().max_tokens`: 400 * 2.5 = 1000
+/// output tokens, leaving headroom under the decoder cap. Inputs that
+/// tokenize beyond this are split by the chunker and translated piecewise.
+const MAX_INPUT_TOKENS: usize = 400;
 
 /// Result of a translation operation.
 ///
@@ -227,7 +234,34 @@ impl NllbTranslator {
 
     /// Translate text between languages using ISO 639-1/3 codes.
     pub async fn translate(&self, text: &str, source_lang: &str, target_lang: &str) -> Result<TranslationResult> {
+        self.translate_inner(text, source_lang, target_lang, false).await
+    }
+
+    /// Reference (pre-KV-cache) twin of [`translate`](Self::translate), kept for
+    /// the numeric-equivalence integration test in `tests/kv_cache_equivalence.rs`.
+    ///
+    /// Identical to `translate` except it drives the full-prefix
+    /// [`NllbModel::generate_reference`] instead of the KV-cached
+    /// [`NllbModel::generate`]. It deliberately **bypasses the translation
+    /// cache** in both directions: it never reads a value that `generate`
+    /// produced (which would make the equivalence diff trivially pass) and never
+    /// writes its own results back (which would poison the cache for production
+    /// `translate` calls). Production code should always call `translate`.
+    #[doc(hidden)]
+    pub async fn translate_reference(&self, text: &str, source_lang: &str, target_lang: &str) -> Result<TranslationResult> {
+        self.translate_inner(text, source_lang, target_lang, true).await
+    }
+
+    /// Shared body for [`translate`](Self::translate) and
+    /// [`translate_reference`](Self::translate_reference).
+    ///
+    /// `reference == false` is the production path: KV-cached generation plus the
+    /// bounded LRU translation cache. `reference == true` selects the full-prefix
+    /// `generate_reference` path and disables all cache reads/writes so the two
+    /// paths stay independent for verification.
+    async fn translate_inner(&self, text: &str, source_lang: &str, target_lang: &str, reference: bool) -> Result<TranslationResult> {
         let start = Instant::now();
+        let use_cache = !reference;
 
         if source_lang == target_lang {
             return Ok(TranslationResult {
@@ -240,14 +274,16 @@ impl NllbTranslator {
         }
 
         let cache_key = format!("{}-{}-{}", text, source_lang, target_lang);
-        if let Some(cached) = self.cache.lock().await.0.get(&cache_key) {
-            return Ok(TranslationResult {
-                text: cached.clone(),
-                source_lang: source_lang.to_string(),
-                target_lang: target_lang.to_string(),
-                duration_ms: 0,
-                chunk_count: 1,
-            });
+        if use_cache {
+            if let Some(cached) = self.cache.lock().await.0.get(&cache_key) {
+                return Ok(TranslationResult {
+                    text: cached.clone(),
+                    source_lang: source_lang.to_string(),
+                    target_lang: target_lang.to_string(),
+                    duration_ms: 0,
+                    chunk_count: 1,
+                });
+            }
         }
 
         let target_nllb = NllbLanguage::from_iso_code(target_lang)
@@ -277,7 +313,7 @@ impl NllbTranslator {
         let (translated_text, chunk_count) = if full_token_count <= MAX_INPUT_TOKENS {
             // Short-input fast path — single encode/generate/decode, no behavior
             // change versus the pre-chunking implementation.
-            let text_out = self.translate_one_chunk(tokenizer, model, text, forced_bos_id)?;
+            let text_out = self.translate_one_chunk(tokenizer, model, text, forced_bos_id, reference)?;
             (text_out, 1)
         } else {
             // Long input: split into token-budgeted chunks, translate each
@@ -291,12 +327,21 @@ impl NllbTranslator {
                 // Per-chunk cache: a long input frequently shares sentences with
                 // a previously translated (possibly shorter) input. Reuses the
                 // same cache map — the key granularity is implicit in the key.
+                // Disabled on the reference path so it stays independent of the
+                // KV-cached path's results.
                 let chunk_key = format!("{}-{}-{}", chunk.text, source_lang, target_lang);
-                let chunk_translation = if let Some(cached) = self.cache.lock().await.0.get(&chunk_key) {
-                    cached.clone()
+                let cached_chunk = if use_cache {
+                    self.cache.lock().await.0.get(&chunk_key).cloned()
                 } else {
-                    let t = self.translate_one_chunk(tokenizer, model, &chunk.text, forced_bos_id)?;
-                    self.cache_insert(chunk_key, t.clone()).await;
+                    None
+                };
+                let chunk_translation = if let Some(cached) = cached_chunk {
+                    cached
+                } else {
+                    let t = self.translate_one_chunk(tokenizer, model, &chunk.text, forced_bos_id, reference)?;
+                    if use_cache {
+                        self.cache_insert(chunk_key, t.clone()).await;
+                    }
                     t
                 };
                 rejoined.push_str(&chunk_translation);
@@ -308,8 +353,10 @@ impl NllbTranslator {
         let duration_ms = start.elapsed().as_millis() as u64;
 
         // Cache the full-input result as well, so a repeat of the identical long
-        // input is served without re-chunking.
-        self.cache_insert(cache_key, translated_text.clone()).await;
+        // input is served without re-chunking. Skipped on the reference path.
+        if use_cache {
+            self.cache_insert(cache_key, translated_text.clone()).await;
+        }
 
         Ok(TranslationResult {
             text: translated_text,
@@ -326,12 +373,17 @@ impl NllbTranslator {
     /// The tokenizer and model are passed in as already-locked references so the
     /// chunked path can process every chunk under a single lock acquisition,
     /// avoiding lock-thrash (the model is serialized regardless).
+    ///
+    /// `reference == true` swaps the KV-cached `generate` for the full-prefix
+    /// `generate_reference` so the equivalence test can diff the two paths over
+    /// the identical encode + decode pipeline.
     fn translate_one_chunk(
         &self,
         tokenizer: &tokenizers::Tokenizer,
         model: &NllbModel,
         text: &str,
         forced_bos_id: u32,
+        reference: bool,
     ) -> Result<String> {
         let encoding = tokenizer.encode(text, true).map_err(|e| Error::Tokenizer(e.to_string()))?;
         let input_ids = encoding.get_ids();
@@ -342,8 +394,12 @@ impl NllbTranslator {
             .map_err(|e| Error::Inference(format!("Encoding failed: {}", e)))?;
         // 1024 is the real ceiling: the decoder shares the 1026-row pos_embeddings
         // tensor (offset 2 -> max output seq_len 1024); a higher cap is a phantom.
-        let output_ids = model.generate(&encoder_output, forced_bos_id, 1024)
-            .map_err(|e| Error::Inference(format!("Generation failed: {}", e)))?;
+        let output_ids = if reference {
+            model.generate_reference(&encoder_output, forced_bos_id, 1024)
+        } else {
+            model.generate(&encoder_output, forced_bos_id, 1024)
+        }
+        .map_err(|e| Error::Inference(format!("Generation failed: {}", e)))?;
 
         let translated_text = tokenizer.decode(&output_ids, true)
             .map_err(|e| Error::Tokenizer(e.to_string()))?
