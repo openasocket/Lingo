@@ -152,13 +152,13 @@ cargo run --example server --features server,metal
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/translate` | `{"text", "source", "target"}` -> translation |
-| POST | `/translate_batch` | `{"texts": [...], "source", "target"}` -> batch translation, no scoring |
+| POST | `/translate` | `{"text", "source", "target"}` -> translation + chunk_count metadata |
+| POST | `/translate_batch` | `{"texts": [...], "source", "target"}` -> batch translation, no scoring + per-item chunk_counts |
 | POST | `/score` | `{"text1", "text2"}` -> similarity score |
 | POST | `/embed` | `{"text"}` -> 768-dim embedding |
 | POST | `/embed_batch` | `{"texts": [...]}` -> batch embeddings |
-| POST | `/analyze` | `{"text", "source", "target"}` -> translation + LaBSE & SONAR scores |
-| POST | `/analyze_batch` | `{"texts": [...], "source", "target"}` -> batch translate + score |
+| POST | `/analyze` | `{"text", "source", "target"}` -> translation + LaBSE & SONAR scores + chunk_count metadata |
+| POST | `/analyze_batch` | `{"texts": [...], "source", "target"}` -> batch translate + score + per-item chunk_counts |
 | GET | `/health` | Server status |
 
 ```bash
@@ -182,7 +182,7 @@ curl -X POST http://localhost:3000/embed_batch \
 curl -X POST http://localhost:3000/analyze \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "source": "en", "target": "fr"}'
-# {"source_text":"Hello world","translation":"Bonjour le monde","labse_score":0.947,"sonar_score":0.744,...}
+# {"source_text":"Hello world","translation":"Bonjour le monde","labse_score":0.947,"sonar_score":0.744,"chunk_count":1,...}
 
 curl -X POST http://localhost:3000/analyze_batch \
   -H "Content-Type: application/json" \
@@ -392,6 +392,18 @@ Scores are cosine similarity of L2-normalized 1024-dim embeddings. Identical on 
 | "Hello world" | "こんにちは世界" (ja) | 0.699 |
 | "The cat sat on the mat" | "The dog ran in the park" | 0.168 |
 | "I love programming" | "I love programming" | 1.000 |
+
+## Long-input handling
+
+NLLB-200 has a 1024-token positional-embedding limit. lingo
+automatically chunks longer input on sentence boundaries (Western
+`.!?` and CJK `。！？` terminators), translates each chunk
+sequentially, and rejoins with the original whitespace preserved.
+The chunk budget is 600 tokens by default, leaving headroom for
+the BOS/EOS/language-code tokens and for verbose target languages
+where the output is longer than the source. Results expose
+`chunk_count` (single) or `chunk_counts` (batch) so callers can
+see when chunking occurred.
 
 ## License
 
