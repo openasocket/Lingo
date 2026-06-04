@@ -174,7 +174,10 @@ async fn main() -> anyhow::Result<()> {
                                 "source": text, "source_lang": from,
                                 "target_lang": target, "translation": r.text,
                                 "duration_ms": r.duration_ms,
+                                "chunk_count": r.chunk_count,
                             }));
+                        } else if r.chunk_count > 1 {
+                            println!("[{}] {} ({}ms, {} chunks)", target, r.text, r.duration_ms, r.chunk_count);
                         } else {
                             println!("[{}] {} ({}ms)", target, r.text, r.duration_ms);
                         }
