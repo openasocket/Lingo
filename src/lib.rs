@@ -33,6 +33,7 @@
 //! }
 //! ```
 
+pub mod chunker;
 pub mod error;
 pub mod labse;
 pub mod languages;
@@ -43,6 +44,7 @@ pub mod sonar;
 #[cfg(feature = "download")]
 pub mod download;
 
+pub use chunker::{chunk_text, Chunk, ChunkerConfig};
 pub use error::{Error, Result};
 pub use labse::LaBSEEncoder;
 pub use languages::NllbLanguage;
