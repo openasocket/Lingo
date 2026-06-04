@@ -48,6 +48,7 @@ pub use chunker::{chunk_text, Chunk, ChunkerConfig};
 pub use error::{Error, Result};
 pub use labse::LaBSEEncoder;
 pub use languages::NllbLanguage;
+pub use model::{DecoderCache, LayerCache};
 pub use license::{check_license_acceptance, license_notice, mark_license_accepted};
 pub use sonar::SonarEncoder;
 

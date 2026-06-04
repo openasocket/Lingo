@@ -150,34 +150,85 @@ impl MultiHeadAttention {
         })
     }
 
+    /// Attention forward with optional KV cache.
+    ///
+    /// Returns `(output, new_kv)` where `new_kv` is the K/V state to cache for
+    /// the next decode step. Mirrors the candle Whisper KV-cache pattern.
+    ///
+    /// - `kv_source = None` (self-attention): K, V are computed from `x`. When
+    ///   `past_kv` is `Some`, the new K/V are concatenated onto the cached
+    ///   prefix along the seq_len axis before attending.
+    /// - `kv_source = Some(enc)` (cross-attention): K, V are computed from
+    ///   `enc` only on the first step (`past_kv = None`). When `past_kv` is
+    ///   `Some`, it is reused verbatim — the encoder output is stable across
+    ///   decode steps, so there is nothing to recompute.
+    /// - Q is always computed from `x`.
     fn forward(
         &self,
-        query: &Tensor,
-        key_value: Option<&Tensor>,
+        x: &Tensor,
+        kv_source: Option<&Tensor>,
+        past_kv: Option<&(Tensor, Tensor)>,
         mask: Option<&Tensor>,
-    ) -> CandleResult<Tensor> {
-        let (b, tgt_len, _) = query.dims3()?;
-        let kv_input = key_value.unwrap_or(query);
+    ) -> CandleResult<(Tensor, Option<(Tensor, Tensor)>)> {
+        let (b, tgt_len, _) = x.dims3()?;
 
-        let q = self.q_proj.forward(query)?;
-        let k = self.k_proj.forward(kv_input)?;
-        let v = self.v_proj.forward(kv_input)?;
-
-        let q = q
+        // Q is always derived from the query input x.
+        let q = self
+            .q_proj
+            .forward(x)?
             .reshape((b, tgt_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let src_len = kv_input.dim(1)?;
-        let k = k
-            .reshape((b, src_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let v = v
-            .reshape((b, src_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
+            .transpose(1, 2)?
+            .contiguous()?;
+
+        // Compute (or reuse) K and V — this becomes the new cache state.
+        let (k, v) = if kv_source.is_some() {
+            // Cross-attention: K/V come from the encoder output, which does not
+            // change between decode steps. Reuse the cache when we have it.
+            if let Some((past_k, past_v)) = past_kv {
+                (past_k.clone(), past_v.clone())
+            } else {
+                let enc = kv_source.unwrap();
+                let src_len = enc.dim(1)?;
+                let k = self
+                    .k_proj
+                    .forward(enc)?
+                    .reshape((b, src_len, self.num_heads, self.head_dim))?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let v = self
+                    .v_proj
+                    .forward(enc)?
+                    .reshape((b, src_len, self.num_heads, self.head_dim))?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                (k, v)
+            }
+        } else {
+            // Self-attention: K/V come from x. Concatenate onto any cached prefix.
+            let new_k = self
+                .k_proj
+                .forward(x)?
+                .reshape((b, tgt_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let new_v = self
+                .v_proj
+                .forward(x)?
+                .reshape((b, tgt_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            if let Some((past_k, past_v)) = past_kv {
+                // Metal requires contiguous tensors for matmul; cat then make
+                // the result contiguous along the seq_len axis (dim 2).
+                let k = Tensor::cat(&[past_k, &new_k], 2)?.contiguous()?;
+                let v = Tensor::cat(&[past_v, &new_v], 2)?.contiguous()?;
+                (k, v)
+            } else {
+                (new_k, new_v)
+            }
+        };
 
         let scale = (self.head_dim as f64).sqrt();
-        let q = q.contiguous()?;
-        let k = k.contiguous()?;
-        let v = v.contiguous()?;
         let attn_raw = q.matmul(&k.transpose(2, 3)?.contiguous()?)?;
         let mut attn_weights = (attn_raw * (1.0 / scale))?;
 
@@ -194,10 +245,12 @@ impl MultiHeadAttention {
         };
         let attn_output = attn_weights.matmul(&v)?;
 
-        attn_output
+        let attn_output = attn_output
             .transpose(1, 2)?
             .reshape((b, tgt_len, self.num_heads * self.head_dim))?
-            .apply(&self.out_proj)
+            .apply(&self.out_proj)?;
+
+        Ok((attn_output, Some((k, v))))
     }
 }
 
@@ -227,7 +280,7 @@ impl EncoderLayer {
     fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
         let residual = x;
         let x = self.self_attn_layer_norm.forward(x)?;
-        let x = self.self_attn.forward(&x, None, None)?;
+        let (x, _) = self.self_attn.forward(&x, None, None, None)?;
         let x = (residual + x)?;
 
         let residual = &x;
@@ -273,12 +326,14 @@ impl DecoderLayer {
     ) -> CandleResult<Tensor> {
         let residual = x;
         let x = self.self_attn_layer_norm.forward(x)?;
-        let x = self.self_attn.forward(&x, None, causal_mask)?;
+        let (x, _) = self.self_attn.forward(&x, None, None, causal_mask)?;
         let x = (residual + x)?;
 
         let residual = &x;
         let x = self.encoder_attn_layer_norm.forward(&x)?;
-        let x = self.encoder_attn.forward(&x, Some(encoder_output), None)?;
+        let (x, _) = self
+            .encoder_attn
+            .forward(&x, Some(encoder_output), None, None)?;
         let x = (residual + x)?;
 
         let residual = &x;
@@ -286,6 +341,41 @@ impl DecoderLayer {
         let x = self.fc1.forward(&x)?.relu()?;
         let x = self.fc2.forward(&x)?;
         residual + x
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KV cache (per-layer self- and cross-attention state for decoding)
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+pub struct LayerCache {
+    /// Self-attention K and V from all prior decode steps for this layer.
+    /// Shape (b, num_heads, seq_so_far, head_dim). None on first step.
+    pub self_attn_kv: Option<(Tensor, Tensor)>,
+    /// Cross-attention K and V — computed once from encoder output,
+    /// reused across all decode steps for this layer. None until
+    /// KV-CACHE-03 fills it.
+    pub cross_attn_kv: Option<(Tensor, Tensor)>,
+}
+
+pub struct DecoderCache {
+    pub layers: Vec<LayerCache>,
+}
+
+impl DecoderCache {
+    pub fn new(num_layers: usize) -> Self {
+        Self {
+            layers: (0..num_layers).map(|_| LayerCache::default()).collect(),
+        }
+    }
+    /// Length of cached self-attention sequence (same for all layers).
+    pub fn self_attn_seq_len(&self) -> usize {
+        self.layers
+            .first()
+            .and_then(|l| l.self_attn_kv.as_ref())
+            .map(|(k, _)| k.dim(2).unwrap_or(0))
+            .unwrap_or(0)
     }
 }
 
@@ -433,5 +523,226 @@ impl NllbModel {
         }
 
         Ok(token_ids[2..].to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `MultiHeadAttention` directly from random `Linear` weights,
+    /// bypassing `MultiHeadAttention::load` (which needs a real VarBuilder).
+    fn build_attention(d_model: usize, num_heads: usize, device: &Device) -> MultiHeadAttention {
+        let head_dim = d_model / num_heads;
+        let inner = num_heads * head_dim;
+        let rand_linear = |out: usize, inp: usize| {
+            let w = Tensor::randn(0f32, 0.1f32, (out, inp), device).unwrap();
+            Linear::new(w, None)
+        };
+        MultiHeadAttention {
+            q_proj: rand_linear(inner, d_model),
+            k_proj: rand_linear(inner, d_model),
+            v_proj: rand_linear(inner, d_model),
+            out_proj: rand_linear(d_model, inner),
+            num_heads,
+            head_dim,
+        }
+    }
+
+    /// Max absolute elementwise difference between two tensors, as f32.
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    }
+
+    #[test]
+    fn attention_self_first_step_returns_kv() {
+        let device = Device::Cpu;
+        let (b, seq, d_model, heads) = (1usize, 4usize, 8usize, 2usize);
+        let head_dim = d_model / heads;
+        let attn = build_attention(d_model, heads, &device);
+        let x = Tensor::randn(0f32, 1f32, (b, seq, d_model), &device).unwrap();
+
+        let (out, kv) = attn.forward(&x, None, None, None).unwrap();
+
+        assert_eq!(out.dims3().unwrap(), (b, seq, d_model));
+        let (k, v) = kv.expect("self-attention first step must return cached K/V");
+        assert_eq!(k.dims4().unwrap(), (b, heads, seq, head_dim));
+        assert_eq!(v.dims4().unwrap(), (b, heads, seq, head_dim));
+    }
+
+    #[test]
+    fn attention_self_continuation_concats_cache() {
+        let device = Device::Cpu;
+        let (b, d_model, heads) = (1usize, 8usize, 2usize);
+        let head_dim = d_model / heads;
+        let attn = build_attention(d_model, heads, &device);
+
+        // First step processes 3 tokens.
+        let x0 = Tensor::randn(0f32, 1f32, (b, 3, d_model), &device).unwrap();
+        let (_, kv0) = attn.forward(&x0, None, None, None).unwrap();
+        let prior = kv0.expect("first step returns cache");
+        assert_eq!(prior.0.dim(2).unwrap(), 3);
+
+        // Continuation: 1 new token, concatenated onto the cached prefix of 3.
+        let x1 = Tensor::randn(0f32, 1f32, (b, 1, d_model), &device).unwrap();
+        let (out, kv1) = attn.forward(&x1, None, Some(&prior), None).unwrap();
+        let (k, v) = kv1.expect("continuation returns updated cache");
+
+        assert_eq!(out.dims3().unwrap(), (b, 1, d_model));
+        assert_eq!(k.dim(2).unwrap(), prior.0.dim(2).unwrap() + 1);
+        assert_eq!(k.dims4().unwrap(), (b, heads, 4, head_dim));
+        assert_eq!(v.dims4().unwrap(), (b, heads, 4, head_dim));
+    }
+
+    #[test]
+    fn attention_cross_first_step_computes_from_kv_source() {
+        let device = Device::Cpu;
+        let (b, d_model, heads) = (1usize, 8usize, 2usize);
+        let head_dim = d_model / heads;
+        let attn = build_attention(d_model, heads, &device);
+
+        let x = Tensor::randn(0f32, 1f32, (b, 2, d_model), &device).unwrap();
+        let enc = Tensor::randn(0f32, 1f32, (b, 5, d_model), &device).unwrap();
+
+        let (out, kv) = attn.forward(&x, Some(&enc), None, None).unwrap();
+        let (k, v) = kv.expect("cross-attention first step returns cache");
+
+        // K/V seq_len follows the encoder source (5), not the query (2).
+        assert_eq!(out.dims3().unwrap(), (b, 2, d_model));
+        assert_eq!(k.dims4().unwrap(), (b, heads, 5, head_dim));
+        assert_eq!(v.dims4().unwrap(), (b, heads, 5, head_dim));
+
+        // The cached K must be a direct projection of the encoder output.
+        let expected_k = attn
+            .k_proj
+            .forward(&enc)
+            .unwrap()
+            .reshape((b, 5, heads, head_dim))
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        assert!(
+            max_abs_diff(&k, &expected_k) < 1e-5,
+            "cross-attn K must derive from kv_source"
+        );
+    }
+
+    #[test]
+    fn attention_cross_continuation_reuses_cache() {
+        let device = Device::Cpu;
+        let (b, d_model, heads) = (1usize, 8usize, 2usize);
+        let attn = build_attention(d_model, heads, &device);
+
+        let x0 = Tensor::randn(0f32, 1f32, (b, 2, d_model), &device).unwrap();
+        let enc = Tensor::randn(0f32, 1f32, (b, 5, d_model), &device).unwrap();
+        let (_, kv0) = attn.forward(&x0, Some(&enc), None, None).unwrap();
+        let prior = kv0.expect("first step returns cache");
+
+        // Continuation with a fresh query token but the same encoder cache.
+        let x1 = Tensor::randn(0f32, 1f32, (b, 1, d_model), &device).unwrap();
+        let (_, kv1) = attn.forward(&x1, Some(&enc), Some(&prior), None).unwrap();
+        let (k, v) = kv1.expect("continuation returns cache");
+
+        // The returned K/V must be the *same* data as the prior cache — proving
+        // cross-attention K/V was reused, not recomputed.
+        assert_eq!(k.dims4().unwrap(), prior.0.dims4().unwrap());
+        assert_eq!(
+            max_abs_diff(&k, &prior.0),
+            0.0,
+            "reused cross-attn K must be identical to the prior cache"
+        );
+        assert_eq!(
+            max_abs_diff(&v, &prior.1),
+            0.0,
+            "reused cross-attn V must be identical to the prior cache"
+        );
+    }
+
+    #[test]
+    fn attention_no_cache_matches_pre_kv_behaviour() {
+        // Regression: the no-cache self-attention path must compute exactly what
+        // the original (pre-KV-cache) implementation did. The original algorithm
+        // is reproduced inline here and compared against the new code path.
+        let device = Device::Cpu;
+        let (b, seq, d_model, heads) = (1usize, 4usize, 8usize, 2usize);
+        let head_dim = d_model / heads;
+        let attn = build_attention(d_model, heads, &device);
+        let x = Tensor::randn(0f32, 1f32, (b, seq, d_model), &device).unwrap();
+
+        let (got, _) = attn.forward(&x, None, None, None).unwrap();
+
+        // --- original pre-cache code path, inlined ---
+        let q = attn.q_proj.forward(&x).unwrap();
+        let k = attn.k_proj.forward(&x).unwrap();
+        let v = attn.v_proj.forward(&x).unwrap();
+        let q = q
+            .reshape((b, seq, heads, head_dim))
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap();
+        let k = k
+            .reshape((b, seq, heads, head_dim))
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap();
+        let v = v
+            .reshape((b, seq, heads, head_dim))
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap();
+        let scale = (head_dim as f64).sqrt();
+        let q = q.contiguous().unwrap();
+        let k = k.contiguous().unwrap();
+        let v = v.contiguous().unwrap();
+        let attn_raw = q
+            .matmul(&k.transpose(2, 3).unwrap().contiguous().unwrap())
+            .unwrap();
+        let attn_weights = (attn_raw * (1.0 / scale)).unwrap();
+        let attn_weights = {
+            let max_vals = attn_weights.max_keepdim(D::Minus1).unwrap();
+            let exp = (attn_weights.broadcast_sub(&max_vals))
+                .unwrap()
+                .exp()
+                .unwrap();
+            let sum = exp.sum_keepdim(D::Minus1).unwrap();
+            exp.broadcast_div(&sum).unwrap()
+        };
+        let attn_output = attn_weights.matmul(&v).unwrap();
+        let expected = attn_output
+            .transpose(1, 2)
+            .unwrap()
+            .reshape((b, seq, heads * head_dim))
+            .unwrap()
+            .apply(&attn.out_proj)
+            .unwrap();
+
+        assert!(
+            max_abs_diff(&got, &expected) < 1e-5,
+            "no-cache path diverged from the original implementation"
+        );
+    }
+
+    #[test]
+    fn decoder_cache_tracks_self_attn_seq_len() {
+        // Sanity check for the new DecoderCache helper.
+        let device = Device::Cpu;
+        let mut cache = DecoderCache::new(2);
+        assert_eq!(cache.layers.len(), 2);
+        assert_eq!(cache.self_attn_seq_len(), 0);
+
+        // Populate layer 0 with a (b, heads, seq, head_dim) self-attn cache.
+        let k = Tensor::randn(0f32, 1f32, (1usize, 2usize, 3usize, 4usize), &device).unwrap();
+        let v = k.clone();
+        cache.layers[0].self_attn_kv = Some((k, v));
+        assert_eq!(cache.self_attn_seq_len(), 3);
     }
 }
