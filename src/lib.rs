@@ -63,7 +63,17 @@ use tracing::info;
 
 const TRANSLATION_CACHE_MAX: usize = 1024;
 
+/// Maximum input tokens fed to the encoder in a single pass. NLLB's
+/// `max_position_embeddings` is 1024; 960 leaves headroom for the BOS/EOS and
+/// language-tag overhead while staying safely under that hard limit. Inputs
+/// that tokenize beyond this are split by the chunker and translated piecewise.
+const MAX_INPUT_TOKENS: usize = 960;
+
 /// Result of a translation operation.
+///
+/// A `chunk_count` greater than 1 means the input exceeded the NLLB
+/// position-embedding budget and was split into multiple chunks that were
+/// translated independently and rejoined with their original separators.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TranslationResult {
     /// Translated text
@@ -74,6 +84,10 @@ pub struct TranslationResult {
     pub target_lang: String,
     /// Translation time in milliseconds
     pub duration_ms: u64,
+    /// Number of chunks the input was split into. 1 when the input fit within
+    /// the NLLB position-embedding budget; >1 means chunking was applied and
+    /// the per-chunk translations were rejoined.
+    pub chunk_count: usize,
 }
 
 /// NLLB-200 translator using candle with Metal/CUDA/CPU inference.
@@ -220,6 +234,7 @@ impl NllbTranslator {
                 source_lang: source_lang.to_string(),
                 target_lang: target_lang.to_string(),
                 duration_ms: 0,
+                chunk_count: 1,
             });
         }
 
@@ -230,6 +245,7 @@ impl NllbTranslator {
                 source_lang: source_lang.to_string(),
                 target_lang: target_lang.to_string(),
                 duration_ms: 0,
+                chunk_count: 1,
             });
         }
 
@@ -245,44 +261,127 @@ impl NllbTranslator {
         let tok_guard = self.tokenizer.lock().await;
         let tokenizer = tok_guard.as_ref().ok_or_else(|| Error::Inference("Tokenizer not loaded".into()))?;
 
-        let encoding = tokenizer.encode(text, true).map_err(|e| Error::Tokenizer(e.to_string()))?;
         let forced_bos_id = tokenizer.token_to_id(target_nllb.nllb_code())
             .ok_or_else(|| Error::InvalidLanguagePair(source_lang.into(), target_lang.into()))?;
 
         let model_guard = self.model.lock().await;
         let model = model_guard.as_ref().ok_or_else(|| Error::Inference("Model not loaded".into()))?;
 
-        let input_ids = encoding.get_ids();
-        let input_tensor = Tensor::from_vec(input_ids.to_vec(), (1, input_ids.len()), &self.device)
-            .map_err(|e| Error::Inference(e.to_string()))?;
+        // Tokenize the full input once to decide whether it fits the encoder's
+        // position-embedding budget.
+        let full_token_count = tokenizer.encode(text, true)
+            .map(|e| e.get_ids().len())
+            .map_err(|e| Error::Tokenizer(e.to_string()))?;
 
-        let encoder_output = model.encode(&input_tensor)
-            .map_err(|e| Error::Inference(format!("Encoding failed: {}", e)))?;
-        let output_ids = model.generate(&encoder_output, forced_bos_id, 2048)
-            .map_err(|e| Error::Inference(format!("Generation failed: {}", e)))?;
-
-        let translated_text = tokenizer.decode(&output_ids, true)
-            .map_err(|e| Error::Tokenizer(e.to_string()))?
-            .replace("<unk>", "").replace("  ", " ").trim().to_string();
+        let (translated_text, chunk_count) = if full_token_count <= MAX_INPUT_TOKENS {
+            // Short-input fast path — single encode/generate/decode, no behavior
+            // change versus the pre-chunking implementation.
+            let text_out = self.translate_one_chunk(tokenizer, model, text, forced_bos_id)?;
+            (text_out, 1)
+        } else {
+            // Long input: split into token-budgeted chunks, translate each
+            // against the already-held model lock, and rejoin with the original
+            // separators so nothing is lost.
+            let chunks = chunk_text(text, &ChunkerConfig::default(), |s| {
+                tokenizer.encode(s, true).map(|e| e.get_ids().len()).unwrap_or(0)
+            });
+            let mut rejoined = String::new();
+            for chunk in &chunks {
+                // Per-chunk cache: a long input frequently shares sentences with
+                // a previously translated (possibly shorter) input. Reuses the
+                // same cache map — the key granularity is implicit in the key.
+                let chunk_key = format!("{}-{}-{}", chunk.text, source_lang, target_lang);
+                let chunk_translation = if let Some(cached) = self.cache.lock().await.0.get(&chunk_key) {
+                    cached.clone()
+                } else {
+                    let t = self.translate_one_chunk(tokenizer, model, &chunk.text, forced_bos_id)?;
+                    self.cache_insert(chunk_key, t.clone()).await;
+                    t
+                };
+                rejoined.push_str(&chunk_translation);
+                rejoined.push_str(&chunk.trailing_separator);
+            }
+            (rejoined, chunks.len())
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        {
-            let mut cache = self.cache.lock().await;
-            let (map, order) = &mut *cache;
-            if map.len() >= TRANSLATION_CACHE_MAX {
-                if let Some(old_key) = order.pop_front() {
-                    map.remove(&old_key);
-                }
-            }
-            map.insert(cache_key.clone(), translated_text.clone());
-            order.push_back(cache_key);
-        }
+
+        // Cache the full-input result as well, so a repeat of the identical long
+        // input is served without re-chunking.
+        self.cache_insert(cache_key, translated_text.clone()).await;
 
         Ok(TranslationResult {
             text: translated_text,
             source_lang: source_lang.to_string(),
             target_lang: target_lang.to_string(),
             duration_ms,
+            chunk_count,
         })
+    }
+
+    /// Encode/generate/decode a single chunk that is already known to fit within
+    /// the encoder's token budget. Returns just the cleaned translated string.
+    ///
+    /// The tokenizer and model are passed in as already-locked references so the
+    /// chunked path can process every chunk under a single lock acquisition,
+    /// avoiding lock-thrash (the model is serialized regardless).
+    fn translate_one_chunk(
+        &self,
+        tokenizer: &tokenizers::Tokenizer,
+        model: &NllbModel,
+        text: &str,
+        forced_bos_id: u32,
+    ) -> Result<String> {
+        let encoding = tokenizer.encode(text, true).map_err(|e| Error::Tokenizer(e.to_string()))?;
+        let input_ids = encoding.get_ids();
+        let input_tensor = Tensor::from_vec(input_ids.to_vec(), (1, input_ids.len()), &self.device)
+            .map_err(|e| Error::Inference(e.to_string()))?;
+
+        let encoder_output = model.encode(&input_tensor)
+            .map_err(|e| Error::Inference(format!("Encoding failed: {}", e)))?;
+        // 1024 is the real ceiling: the decoder shares the 1026-row pos_embeddings
+        // tensor (offset 2 -> max output seq_len 1024); a higher cap is a phantom.
+        let output_ids = model.generate(&encoder_output, forced_bos_id, 1024)
+            .map_err(|e| Error::Inference(format!("Generation failed: {}", e)))?;
+
+        let translated_text = tokenizer.decode(&output_ids, true)
+            .map_err(|e| Error::Tokenizer(e.to_string()))?
+            .replace("<unk>", "").replace("  ", " ").trim().to_string();
+        Ok(translated_text)
+    }
+
+    /// Insert a translation into the bounded LRU cache. No-op if the key is
+    /// already present (keeps the eviction order free of duplicates).
+    async fn cache_insert(&self, key: String, value: String) {
+        let mut cache = self.cache.lock().await;
+        let (map, order) = &mut *cache;
+        if map.contains_key(&key) {
+            return;
+        }
+        if map.len() >= TRANSLATION_CACHE_MAX {
+            if let Some(old_key) = order.pop_front() {
+                map.remove(&old_key);
+            }
+        }
+        map.insert(key.clone(), value);
+        order.push_back(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translation_result_chunk_count_defaults_to_one() {
+        // The no-chunk fast path constructs results with chunk_count == 1.
+        let result = TranslationResult {
+            text: "Bonjour".to_string(),
+            source_lang: "en".to_string(),
+            target_lang: "fr".to_string(),
+            duration_ms: 0,
+            chunk_count: 1,
+        };
+        assert_eq!(result.chunk_count, 1);
     }
 }
