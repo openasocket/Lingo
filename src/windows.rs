@@ -105,6 +105,23 @@ mod tests {
         assert_eq!(w.iter().map(|x| x.weight).sum::<usize>(), 10);
     }
 
+    /// Parity with the retired candle-nllb fork's windows tests.
+    #[test]
+    fn hundred_thousand_tokens_stay_within_context() {
+        let ids: Vec<u32> = (0..100_000).collect();
+        let (lead, trail) = special_frame(&vec![0; ids.len()]);
+        let w = token_windows(&ids, lead, trail, 512);
+        assert_eq!(w.len(), 100_000usize.div_ceil(512));
+        assert!(w.iter().all(|x| x.ids.len() <= 512));
+    }
+
+    #[test]
+    fn combine_matches_fork_weights_exactly() {
+        let out = combine(vec![(vec![1.0, 0.0], 3), (vec![0.0, 1.0], 1)]);
+        assert!((out[0] - 3.0 / 10f32.sqrt()).abs() < 1e-6);
+        assert!((out[1] - 1.0 / 10f32.sqrt()).abs() < 1e-6);
+    }
+
     #[test]
     fn special_frame_counts_both_ends() {
         assert_eq!(special_frame(&[1, 0, 0, 1]), (1, 1));

@@ -861,6 +861,62 @@ mod tests {
         assert!(has_dangling_clause("Is that okay?", "Ist das okay;", German));
     }
 
+    /// Cases carried over verbatim from the retired candle-nllb fork's
+    /// `rejects_visible_clause_truncation_without_requiring_final_punctuation`
+    /// and `greek_question_mark_is_not_a_dangling_clause` tests.
+    #[test]
+    fn dangling_clause_matches_candle_nllb_fork_cases() {
+        use NllbLanguage::{Chinese, French, Greek};
+        assert!(has_dangling_clause("Deliver the full sentence.", "给我发送钱,", Chinese));
+        assert!(has_dangling_clause("Complete source.", "Première partie :", French));
+        assert!(!has_dangling_clause("Complete source.", "完整翻译", Chinese));
+        assert!(!has_dangling_clause("Label:", "标签：", Chinese));
+
+        assert!(!has_dangling_clause("How are you today?", "Πώς είσαι σήμερα;", Greek));
+        assert!(!has_dangling_clause("How are you today?", "Πώς είσαι σήμερα\u{037E}", Greek));
+        // Only a question may end with the Greek question mark.
+        assert!(has_dangling_clause("A full statement.", "Μια δήλωση;", Greek));
+        // Other targets keep the strict rule.
+        assert!(has_dangling_clause("How are you today?", "Comment ;", French));
+    }
+
+    /// The three en→el calibration rows strict mode used to reject (SlopShift
+    /// lingo-migration verification §3). Strict mode checks each sentence unit,
+    /// so the question unit must pass, and so must the whole row.
+    #[test]
+    fn greek_calibration_questions_are_not_dangling() {
+        let rows = [
+            ("Hello! How are you doing today?", "- Γεια σου! - Πώς τα πας σήμερα;", "- Πώς τα πας σήμερα;"),
+            (
+                "Hello! I hope you're doing well. I'd like to ask you a series of questions to learn more about you. Is that okay?",
+                "- Γεια σου! Ελπίζω να τα πας καλά. Θα ήθελα να σας κάνω μια σειρά ερωτήσεων για να μάθω περισσότερα για εσάς. - Δεν πειράζει;",
+                "- Δεν πειράζει;",
+            ),
+            (
+                "What is the capital of France and why is it important?",
+                "Ποια είναι η πρωτεύουσα της Γαλλίας και γιατί είναι σημαντική;",
+                "Ποια είναι η πρωτεύουσα της Γαλλίας και γιατί είναι σημαντική;",
+            ),
+        ];
+        for (source, whole, last_unit_out) in rows {
+            assert!(!has_dangling_clause(source, whole, NllbLanguage::Greek), "{source}");
+            let units = sentence_units(source);
+            let last_unit = &units.last().unwrap().text;
+            assert!(last_unit.ends_with('?'), "{last_unit}");
+            assert!(!has_dangling_clause(last_unit, last_unit_out, NllbLanguage::Greek), "{last_unit}");
+        }
+    }
+
+    /// `TranslateConfig::strict()` enables all three checks the fork applied
+    /// (empty output, dangling clause) plus repetition, which the fork lacked.
+    #[test]
+    fn strict_config_enables_every_check() {
+        let s = TranslateConfig::strict();
+        assert!(s.per_sentence && s.reject_empty && s.reject_dangling_clause && s.reject_repetition);
+        let d = TranslateConfig::default();
+        assert!(!d.per_sentence && !d.reject_empty && !d.reject_dangling_clause && !d.reject_repetition);
+    }
+
     #[test]
     fn nllb_codes_resolve_and_uncovered_languages_are_rejected() {
         assert_eq!(resolve_language("fra_Latn", "fra_Latn", "en").unwrap().iso_code(), "fr");

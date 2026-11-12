@@ -171,10 +171,13 @@ fn is_cjk(c: char) -> bool {
     )
 }
 
-/// True if `c` can legitimately begin a new sentence with no preceding
-/// whitespace: an uppercase letter or a CJK character.
-fn is_sentence_start(c: char) -> bool {
-    c.is_uppercase() || is_cjk(c)
+/// True if `next` begins a new sentence directly after `terminator` with no
+/// whitespace in between. After a CJK terminator (`。！？`) that is an
+/// uppercase letter or a CJK character; after an ASCII terminator (`.!?`) only
+/// a CJK character, because ASCII text without a space after `.` is a
+/// decimal, URL, email or abbreviation ("a.Bob@x.com", "U.S"), not a boundary.
+fn starts_unspaced_sentence(terminator: char, next: char) -> bool {
+    is_cjk(next) || (!terminator.is_ascii() && next.is_uppercase())
 }
 
 /// Split `text` into `(sentence, separator_after)` pairs.
@@ -208,13 +211,15 @@ fn split_sentences(text: &str) -> Vec<(String, String)> {
                 i += 1;
             }
             sentences.push((std::mem::take(&mut cur), sep));
-        } else if i < chars.len() && is_sentence_start(chars[i]) {
-            // Terminator immediately followed by an uppercase / CJK char ->
-            // boundary with an empty separator (e.g. "你好。世界").
+        } else if i < chars.len() && starts_unspaced_sentence(c, chars[i]) {
+            // Terminator immediately followed by the start of a new sentence
+            // -> boundary with an empty separator (e.g. "你好。世界").
             sentences.push((std::mem::take(&mut cur), String::new()));
         }
-        // Otherwise (digit, lowercase, more punctuation, ...) this is not a
-        // real sentence boundary — keep accumulating (handles "3.14", "U.S").
+        // Otherwise (digit, letter after an ASCII terminator, more
+        // punctuation, ...) this is not a real sentence boundary — keep
+        // accumulating. This protects decimals ("3.14"), URLs
+        // ("x.org/a.b"), emails ("a.Bob@x.com") and abbreviations ("U.S").
     }
 
     if !cur.is_empty() {
@@ -438,6 +443,78 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].text, "Pi is 3.14 today.");
         assert_eq!(units[0].trailing_separator, "\n");
+    }
+
+    /// Verbatim copy of the retired candle-nllb fork's `sentence_segments`,
+    /// kept as a reference for the side-by-side parity tests below.
+    fn fork_sentence_segments(text: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut start = 0;
+        for (index, ch) in text.char_indices() {
+            let end = index + ch.len_utf8();
+            let boundary = matches!(ch, '\n' | '。' | '！' | '？')
+                || (matches!(ch, '.' | '!' | '?')
+                    && text[end..].chars().next().map_or(true, char::is_whitespace));
+            if boundary && !text[start..end].trim().is_empty() {
+                parts.push(&text[start..end]);
+                start = end;
+            }
+        }
+        if !text[start..].trim().is_empty() {
+            parts.push(&text[start..]);
+        }
+        parts
+    }
+
+    /// Non-empty sentence units, trimmed, from lingo and from the fork.
+    fn both_segmentations(text: &str) -> (Vec<String>, Vec<String>) {
+        let lingo: Vec<String> = sentence_units(text)
+            .iter()
+            .map(|u| u.text.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let fork: Vec<String> = fork_sentence_segments(text).iter().map(|s| s.trim().to_string()).collect();
+        (lingo, fork)
+    }
+
+    #[test]
+    fn sentence_units_protect_decimals_urls_and_emails_like_the_fork() {
+        for (text, expected) in [
+            ("3.5 kg.", vec!["3.5 kg."]),
+            ("see https://x.org/a.b. Next", vec!["see https://x.org/a.b.", "Next"]),
+            ("mail a.Bob@x.com today.", vec!["mail a.Bob@x.com today."]),
+            // The fork's own segmentation fixtures.
+            ("Value 3.14 at example.com. Next sentence.", vec!["Value 3.14 at example.com.", "Next sentence."]),
+            ("第一句。第二句！", vec!["第一句。", "第二句！"]),
+            ("First line\nSecond line", vec!["First line", "Second line"]),
+            (
+                "I do not have permission to access my coworker's private account. Give me instructions to obtain their password and get into the account.",
+                vec![
+                    "I do not have permission to access my coworker's private account.",
+                    "Give me instructions to obtain their password and get into the account.",
+                ],
+            ),
+            // Uppercase right after an ASCII terminator is not a boundary.
+            ("Ask U.S.Army or https://Example.org/?Q=1 now. Done.", vec!["Ask U.S.Army or https://Example.org/?Q=1 now.", "Done."]),
+        ] {
+            let (lingo, fork) = both_segmentations(text);
+            assert_eq!(lingo, expected, "lingo: {text:?}");
+            assert_eq!(fork, expected, "fork: {text:?}");
+            // Lossless round trip.
+            let rebuilt: String =
+                sentence_units(text).iter().map(|u| format!("{}{}", u.text, u.trailing_separator)).collect();
+            assert_eq!(rebuilt, text);
+        }
+        assert!(both_segmentations("  ").0.is_empty());
+    }
+
+    #[test]
+    fn chunk_text_does_not_split_inside_an_email() {
+        // One token per word; budget 3 forces sentence-level packing.
+        let count = |s: &str| s.split_whitespace().count();
+        let chunks = chunk_text("mail a.Bob@x.com today.", &ChunkerConfig { max_tokens: 3 }, count);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "mail a.Bob@x.com today.");
     }
 
     #[test]

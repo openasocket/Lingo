@@ -387,6 +387,7 @@ examples/
   similarity.rs   LaBSE demo
   benchmark.rs    Full perf suite (NLLB + LaBSE + SONAR)
   strict_and_windows.rs  Live check: strict mode, NLLB-code resolution, windowing
+  batch_translate.rs     JSONL {text, source, target} -> + {translation, duration_ms} | {error}, strict mode
   server.rs       Axum HTTP server
 scripts/
   convert_nllb_safetensors.py    HF safetensors -> F16 safetensors for NLLB (optional)

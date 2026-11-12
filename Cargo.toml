@@ -38,6 +38,10 @@ name = "strict_and_windows"
 path = "examples/strict_and_windows.rs"
 
 [[example]]
+name = "batch_translate"
+path = "examples/batch_translate.rs"
+
+[[example]]
 name = "server"
 path = "examples/server.rs"
 required-features = ["server"]
