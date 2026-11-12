@@ -1,45 +1,86 @@
 #!/usr/bin/env python3
 """
-Convert SONAR text encoder from fairseq2 checkpoint to safetensors format.
-This enables loading in candle (Rust) without Python dependencies.
+Convert the SONAR text encoder checkpoint to safetensors for candle (Rust).
 
 Downloads directly from Meta's CDN — no sonar-space or fairseq2 required.
-Only needs: torch, safetensors, sentencepiece, tokenizers
+Only needs: torch, safetensors
+
+Every download is verified against a pinned SHA-256 before use, the
+checkpoint is loaded with ``torch.load(weights_only=True)`` (no arbitrary
+unpickling), and outputs are written to a temporary name and renamed into
+place so an interrupted run never leaves a partial file behind.
+
+SONAR shares NLLB-200's SentencePiece vocabulary, so the tokenizer is the
+HuggingFace NLLB ``tokenizer.json`` (pinned revision); lingo remaps its four
+special-token IDs to fairseq2's layout at runtime.
 
 Usage:
-    python scripts/convert_sonar_safetensors.py [--output-dir ~/.cache/lingo/sonar]
+    python3 scripts/convert_sonar_safetensors.py [--output-dir ~/.cache/lingo/sonar]
 """
 
 import argparse
+import hashlib
 import os
 import sys
 import urllib.request
 from pathlib import Path
 
-
 CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/SONAR/sonar_text_encoder.pt"
-SPM_URL = "https://dl.fbaipublicfiles.com/SONAR/sentencepiece.source.256000.model"
+CHECKPOINT_SHA256 = "b46ffc66abd0519ce6693797eaf8b15da9011159eae18d99900c273a54208bf7"
+
+TOKENIZER_URL = (
+    "https://huggingface.co/facebook/nllb-200-distilled-600M/resolve/"
+    "f8d333a098d19b4fd9a8b18f94170487ad3f821d/tokenizer.json"
+)
+TOKENIZER_SHA256 = "e316b82de11d0f951f370943b3c438311629547285129b0b81dadabd01bca665"
 
 
-def download_file(url, dest):
-    """Download a file with progress indicator."""
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def download_verified(url, dest, expected_sha256):
+    """Download `url` to `dest` via a `.part` file, verifying SHA-256.
+
+    An existing `dest` is re-verified and re-downloaded if it does not match.
+    """
     if dest.exists():
-        size_mb = dest.stat().st_size / 1e6
-        print(f"  {dest.name} already downloaded ({size_mb:.1f} MB)")
-        return
+        if sha256_file(dest) == expected_sha256:
+            print(f"  {dest.name} already downloaded and verified")
+            return
+        print(f"  {dest.name} exists but fails verification; re-downloading")
+        dest.unlink()
 
+    part = dest.with_name(dest.name + ".part")
     print(f"  Downloading {dest.name} from {url}...")
 
     def reporthook(block_num, block_size, total_size):
         downloaded = block_num * block_size
         if total_size > 0:
             pct = min(100.0, downloaded * 100.0 / total_size)
-            mb = downloaded / 1e6
-            total_mb = total_size / 1e6
-            print(f"\r  {mb:.1f}/{total_mb:.1f} MB ({pct:.0f}%)", end="", flush=True)
+            print(
+                f"\r  {downloaded / 1e6:.1f}/{total_size / 1e6:.1f} MB ({pct:.0f}%)",
+                end="",
+                flush=True,
+            )
 
-    urllib.request.urlretrieve(url, str(dest), reporthook=reporthook)
-    print()
+    try:
+        urllib.request.urlretrieve(url, str(part), reporthook=reporthook)
+        print()
+        actual = sha256_file(part)
+        if actual != expected_sha256:
+            raise SystemExit(
+                f"SHA-256 mismatch for {url}:\n  expected {expected_sha256}\n  got      {actual}\n"
+                "Refusing to use this file."
+            )
+        os.replace(part, dest)
+    finally:
+        if part.exists():
+            part.unlink()
 
 
 def main():
@@ -49,51 +90,53 @@ def main():
         default=str(Path.home() / ".cache/lingo/sonar"),
         help="Output directory for safetensors model",
     )
+    parser.add_argument(
+        "--skip-tokenizer",
+        action="store_true",
+        help="Do not fetch tokenizer.json (lingo's Rust downloader fetches it itself)",
+    )
+    parser.add_argument(
+        "--keep-checkpoint",
+        action="store_true",
+        help="Keep the ~3 GB PyTorch checkpoint after conversion",
+    )
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / "model.safetensors"
 
-    # Check if already converted
-    if (output_dir / "model.safetensors").exists() and (output_dir / "tokenizer.json").exists():
-        size_mb = (output_dir / "model.safetensors").stat().st_size / 1e6
+    if not args.skip_tokenizer:
+        print("Fetching tokenizer.json (NLLB-200 vocabulary)...")
+        download_verified(TOKENIZER_URL, output_dir / "tokenizer.json", TOKENIZER_SHA256)
+
+    if model_path.exists():
+        size_mb = model_path.stat().st_size / 1e6
         print(f"model.safetensors already exists ({size_mb:.0f} MB)")
-        print(f"Delete {output_dir / 'model.safetensors'} to reconvert.")
+        print(f"Delete {model_path} to reconvert.")
         return
 
-    print("Converting SONAR text encoder to safetensors...")
-    print(f"Output: {output_dir}")
-    print()
-
-    # Install dependencies if needed
     try:
         import torch
         from safetensors.torch import save_file
-        import sentencepiece as spm
     except ImportError as e:
-        print(f"Missing dependency: {e}")
-        print("Installing torch, safetensors, sentencepiece, tokenizers...")
-        import subprocess
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install",
-            "torch", "safetensors", "sentencepiece", "tokenizers",
-        ])
-        import torch
-        from safetensors.torch import save_file
-        import sentencepiece as spm
+        raise SystemExit(
+            f"Missing dependency: {e}\n"
+            "Install them first, e.g.:  python3 -m pip install torch safetensors"
+        )
 
-    # Download checkpoint and SPM tokenizer from Meta's CDN
+    print("Converting SONAR text encoder to safetensors...")
+    print(f"Output: {output_dir}\n")
+
     checkpoint_path = output_dir / "sonar_text_encoder.pt"
-    spm_path = output_dir / "sentencepiece.source.256000.model"
+    download_verified(CHECKPOINT_URL, checkpoint_path, CHECKPOINT_SHA256)
 
-    download_file(CHECKPOINT_URL, checkpoint_path)
-    download_file(SPM_URL, spm_path)
-
-    # Load PyTorch checkpoint
     print("\nLoading checkpoint...")
-    checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    # weights_only=True restricts unpickling to tensors and plain containers;
+    # the checkpoint only references OrderedDict / FloatStorage /
+    # _rebuild_tensor_v2, all of which the safe loader allows.
+    checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
 
-    # The checkpoint may have a "model" key or be the state dict directly
     if "model" in checkpoint:
         state_dict = checkpoint["model"]
     elif "state_dict" in checkpoint:
@@ -101,64 +144,31 @@ def main():
     else:
         state_dict = checkpoint
 
-    # Convert all tensors to float32 for safetensors compatibility
     print("Converting to float32...")
-    converted = {}
-    for key, tensor in state_dict.items():
-        if isinstance(tensor, torch.Tensor):
-            converted[key] = tensor.float().contiguous()
+    converted = {
+        key: tensor.float().contiguous()
+        for key, tensor in state_dict.items()
+        if isinstance(tensor, torch.Tensor)
+    }
 
-    # Print weight names
-    print(f"\nModel has {len(converted)} tensors:")
-    total_params = 0
-    for key in sorted(converted.keys()):
-        shape = list(converted[key].shape)
-        params = converted[key].numel()
-        total_params += params
-        print(f"  {key:60s} {str(shape):>20s}  ({params:>12,} params)")
-    print(f"\nTotal parameters: {total_params:,}")
+    total_params = sum(t.numel() for t in converted.values())
+    print(f"Model has {len(converted)} tensors, {total_params:,} parameters")
 
-    # Save as safetensors
-    print(f"\nSaving model.safetensors...")
-    save_file(converted, str(output_dir / "model.safetensors"))
-    size_mb = (output_dir / "model.safetensors").stat().st_size / 1e6
-    print(f"Saved model.safetensors ({size_mb:.0f} MB)")
+    part = model_path.with_name(model_path.name + ".part")
+    try:
+        save_file(converted, str(part))
+        os.replace(part, model_path)
+    finally:
+        if part.exists():
+            part.unlink()
+    print(f"Saved model.safetensors ({model_path.stat().st_size / 1e6:.0f} MB)")
 
-    # Convert SentencePiece tokenizer to HuggingFace tokenizers JSON format
-    print("\nConverting tokenizer...")
-    sp = spm.SentencePieceProcessor()
-    sp.Load(str(spm_path))
+    if not args.keep_checkpoint:
+        checkpoint_path.unlink()
+        print("Removed the PyTorch checkpoint (use --keep-checkpoint to retain it)")
 
-    from tokenizers import Tokenizer
-    from tokenizers.models import Unigram
-    from tokenizers.pre_tokenizers import Metaspace
-    from tokenizers.decoders import Metaspace as MetaspaceDecoder
-
-    # Build Unigram vocab: list of (piece, log_prob) tuples
-    vocab_list = []
-    for i in range(sp.GetPieceSize()):
-        piece = sp.IdToPiece(i)
-        score = sp.GetScore(i)
-        vocab_list.append((piece, score))
-
-    tok = Tokenizer(Unigram(vocab_list))
-    tok.pre_tokenizer = Metaspace()
-    tok.decoder = MetaspaceDecoder()
-
-    tok.save(str(output_dir / "tokenizer.json"))
-    print(f"Saved tokenizer.json ({sp.GetPieceSize()} tokens)")
-
-    # Clean up raw checkpoint (keep safetensors + tokenizer.json + spm model)
-    print()
-    print(f"Done! Model saved to: {output_dir}")
-    print(f"Files:")
-    for f in sorted(output_dir.iterdir()):
-        size = f.stat().st_size
-        if size > 1e6:
-            print(f"  {f.name:40s} {size/1e6:.1f} MB")
-        else:
-            print(f"  {f.name:40s} {size/1e3:.1f} KB")
+    print(f"\nDone! Model saved to: {output_dir}")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

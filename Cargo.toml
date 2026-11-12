@@ -34,6 +34,10 @@ name = "benchmark"
 path = "examples/benchmark.rs"
 
 [[example]]
+name = "strict_and_windows"
+path = "examples/strict_and_windows.rs"
+
+[[example]]
 name = "server"
 path = "examples/server.rs"
 required-features = ["server"]
@@ -48,9 +52,10 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 
 # Model downloads
 hf-hub = { version = "0.3", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 # Async
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time", "rt"] }
 
 # Error handling
 thiserror = "1.0"
@@ -73,16 +78,15 @@ indicatif = { version = "0.17", optional = true }
 
 # Server (optional)
 axum = { version = "0.7", optional = true }
-tower-http = { version = "0.5", features = ["cors"], optional = true }
 
 [features]
 default = []
 metal = ["candle-core/metal"]
 cuda = ["candle-core/cuda"]
 accelerate = ["candle-core/accelerate"]
-download = ["hf-hub"]
+download = ["hf-hub", "sha2"]
 cli = ["clap", "tracing-subscriber", "indicatif", "download", "tokio/full"]
-server = ["axum", "tower-http", "tracing-subscriber", "tokio/full"]
+server = ["axum", "tracing-subscriber", "tokio/full"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }

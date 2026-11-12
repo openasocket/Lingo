@@ -69,6 +69,10 @@ fn sentinel_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate `LINGO_ACCEPT_LICENSE` (tests run in
+    /// parallel threads and the environment is process-global).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn license_notice_is_non_empty() {
         let notice = license_notice();
@@ -84,6 +88,7 @@ mod tests {
 
     #[test]
     fn env_var_override_accepts_license() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Save and restore env var
         let prev = std::env::var("LINGO_ACCEPT_LICENSE").ok();
         std::env::set_var("LINGO_ACCEPT_LICENSE", "1");
@@ -96,14 +101,14 @@ mod tests {
 
     #[test]
     fn require_license_acceptance_returns_error_when_not_accepted() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("LINGO_ACCEPT_LICENSE").ok();
         std::env::remove_var("LINGO_ACCEPT_LICENSE");
         // With no env var and (likely) no sentinel file, this should fail
         // unless the test machine has accepted — so we just check the function runs.
         let _ = require_license_acceptance();
-        match prev {
-            Some(v) => std::env::set_var("LINGO_ACCEPT_LICENSE", v),
-            None => {}
+        if let Some(v) = prev {
+            std::env::set_var("LINGO_ACCEPT_LICENSE", v);
         }
     }
 }

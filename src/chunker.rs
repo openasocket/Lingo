@@ -12,8 +12,8 @@
 //! tests use a word-count or char-count stand-in) and lets the caller plug in
 //! the real NLLB tokenizer in production.
 //!
-//! This module is standalone — it is *not* wired into
-//! [`crate::NllbTranslator::translate`] yet (that integration is a later phase).
+//! [`crate::NllbTranslator::translate`] uses it for any input whose framed token
+//! count exceeds the 400-token encoder budget.
 
 /// A single chunk of source text plus the separator that followed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,13 +28,19 @@ pub struct Chunk {
 /// Configuration for [`chunk_text`].
 #[derive(Debug, Clone)]
 pub struct ChunkerConfig {
-    /// Max tokens per chunk. Default 600.
+    /// Max tokens per chunk. Default 400.
+    ///
+    /// Sized so that, after NLLB's typical 2.5x output expansion for verbose
+    /// target languages (German compounds, Japanese kana, Spanish articles),
+    /// generated output stays under the decoder's 1024-token positional-
+    /// embedding ceiling: 400 input * 2.5 ~= 1000 output tokens, leaving
+    /// headroom against the model's hard limit.
     pub max_tokens: usize,
 }
 
 impl Default for ChunkerConfig {
     fn default() -> Self {
-        Self { max_tokens: 600 }
+        Self { max_tokens: 400 }
     }
 }
 
@@ -93,6 +99,57 @@ where
     }
 
     chunks
+}
+
+/// Split `text` into sentence-level units for sentence-at-a-time translation.
+///
+/// Boundaries are sentence terminators (as in [`chunk_text`]) and line breaks.
+/// Concatenating every unit's `text` followed by its `trailing_separator`
+/// reproduces `text` exactly. Units may be whitespace-only (e.g. leading blank
+/// lines); callers should skip those.
+pub fn sentence_units(text: &str) -> Vec<Chunk> {
+    let mut units = Vec::new();
+    for (sentence, sep) in split_sentences(text) {
+        let mut pieces = split_on_line_breaks(&sentence);
+        if let Some(last) = pieces.last_mut() {
+            last.trailing_separator.push_str(&sep);
+        }
+        units.extend(pieces);
+    }
+    units
+}
+
+/// Split at whitespace runs that contain a newline, once some non-whitespace
+/// text has accumulated. The newline-bearing run becomes the separator.
+fn split_on_line_breaks(s: &str) -> Vec<Chunk> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            let start = i;
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            let run: String = chars[start..i].iter().collect();
+            if run.contains('\n') && !cur.trim().is_empty() && i < chars.len() {
+                out.push(Chunk { text: std::mem::take(&mut cur), trailing_separator: run });
+            } else if run.contains('\n') && !cur.trim().is_empty() {
+                // Trailing newline run at the very end: keep as separator.
+                out.push(Chunk { text: std::mem::take(&mut cur), trailing_separator: run });
+            } else {
+                cur.push_str(&run);
+            }
+        } else {
+            cur.push(chars[i]);
+            i += 1;
+        }
+    }
+    if !cur.is_empty() || out.is_empty() {
+        out.push(Chunk { text: cur, trailing_separator: String::new() });
+    }
+    out
 }
 
 /// True for Western and CJK sentence terminators.
@@ -362,6 +419,25 @@ mod tests {
         assert_eq!(chunks[0].text, "你好。");
         assert_eq!(chunks[1].text, "世界！");
         assert_eq!(chunks[2].text, "再见？");
+    }
+
+    #[test]
+    fn sentence_units_split_on_terminators_and_newlines_and_round_trip() {
+        let text = "First one. Second one!\nHeading without period\n\nLast line";
+        let units = sentence_units(text);
+        let texts: Vec<&str> = units.iter().map(|u| u.text.as_str()).collect();
+        assert_eq!(texts, ["First one.", "Second one!", "Heading without period", "Last line"]);
+        let rebuilt: String = units.iter().map(|u| format!("{}{}", u.text, u.trailing_separator)).collect();
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn sentence_units_keep_decimals_and_trailing_newline() {
+        let text = "Pi is 3.14 today.\n";
+        let units = sentence_units(text);
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].text, "Pi is 3.14 today.");
+        assert_eq!(units[0].trailing_separator, "\n");
     }
 
     #[test]

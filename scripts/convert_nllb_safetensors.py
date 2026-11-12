@@ -18,13 +18,23 @@ def main():
     parser = argparse.ArgumentParser(description="Convert NLLB to safetensors")
     parser.add_argument(
         "--output-dir",
-        default=str(Path.home() / ".slopshift/models/nllb-candle"),
+        default=str(Path.home() / ".cache/lingo/nllb-200-distilled-600M"),
         help="Output directory for safetensors model",
     )
     parser.add_argument(
         "--model-id",
         default="facebook/nllb-200-distilled-600M",
         help="HuggingFace model ID",
+    )
+    parser.add_argument(
+        "--revision",
+        default="a3e77be725cf30383f1faeb8d2f0b0ea98ac554e",
+        help="Model revision (default: refs/pr/45, which publishes safetensors weights)",
+    )
+    parser.add_argument(
+        "--tokenizer-revision",
+        default="f8d333a098d19b4fd9a8b18f94170487ad3f821d",
+        help="Tokenizer revision (default: pinned main)",
     )
     parser.add_argument(
         "--dtype",
@@ -48,29 +58,25 @@ def main():
     print(f"Output: {output_dir}")
     print()
 
-    # Install dependencies if needed
     try:
         import torch
         import transformers
         from safetensors.torch import save_file
     except ImportError as e:
-        print(f"Missing dependency: {e}")
-        print("Installing transformers, torch, safetensors...")
-        import subprocess
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install",
-            "transformers", "torch", "safetensors", "sentencepiece"
-        ])
-        import torch
-        import transformers
-        from safetensors.torch import save_file
+        raise SystemExit(
+            f"Missing dependency: {e}\n"
+            "Install them first, e.g.:  python3 -m pip install transformers torch safetensors sentencepiece"
+        )
 
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
     # Download and load model
     print(f"Downloading {args.model_id} from HuggingFace...")
     print("(This downloads ~2.4GB on first run, cached after that)")
-    model = AutoModelForSeq2SeqLM.from_pretrained(args.model_id)
+    # use_safetensors=True never unpickles a .bin checkpoint.
+    model = AutoModelForSeq2SeqLM.from_pretrained(
+        args.model_id, revision=args.revision, use_safetensors=True
+    )
 
     # Convert to target dtype
     if args.dtype == "float16":
@@ -97,14 +103,28 @@ def main():
         del state_dict[key]
         print(f"  Removed tied weight: {key} (shared with model.shared.weight)")
 
-    save_file(state_dict, str(output_dir / "model.safetensors"))
+    target = output_dir / "model.safetensors"
+    part = target.with_name(target.name + ".part")
+    try:
+        save_file({k: v.contiguous() for k, v in state_dict.items()}, str(part))
+        os.replace(part, target)
+    finally:
+        if part.exists():
+            part.unlink()
 
     size_mb = (output_dir / "model.safetensors").stat().st_size / 1e6
     print(f"Saved model.safetensors ({size_mb:.0f} MB)")
 
     # Copy tokenizer.json
     print("Downloading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id, revision=args.tokenizer_revision)
+    # save_pretrained follows symlinks; drop any links into the HF cache first
+    # so it never rewrites the cached blobs in place.
+    for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "config.json",
+                 "sentencepiece.bpe.model"):
+        p = output_dir / name
+        if p.is_symlink():
+            p.unlink()
     tokenizer.save_pretrained(str(output_dir))
 
     # Also save config.json for reference

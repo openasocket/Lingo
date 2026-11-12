@@ -11,14 +11,20 @@
 
 use candle_core::{DType, Device, IndexOp, Result as CandleResult, Tensor, D};
 use candle_nn::{linear, Linear, Module, VarBuilder};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
+use crate::cache::BoundedCache;
 use crate::error::{Error, Result};
+
+/// Max entries in the embedding memo cache.
+const EMBED_CACHE_MAX: usize = 4096;
+/// Inputs larger than this are not memoized.
+const EMBED_CACHE_MAX_KEY_BYTES: usize = 8 * 1024;
 
 // ---------------------------------------------------------------------------
 // BERT config (parsed from config.json)
@@ -293,6 +299,8 @@ impl CustomBertModel {
 
 struct LaBSEModel {
     bert: CustomBertModel,
+    /// Context length (BERT `max_position_embeddings`, 512 for LaBSE).
+    max_len: usize,
     dense_weight: Tensor,
     dense_bias: Tensor,
 }
@@ -323,7 +331,7 @@ impl LaBSEModel {
             ));
         };
 
-        Ok(Self { bert, dense_weight, dense_bias })
+        Ok(Self { bert, max_len: config.max_position_embeddings, dense_weight, dense_bias })
     }
 
     /// Encode a batch of token IDs into normalized embeddings.
@@ -379,7 +387,8 @@ pub struct LaBSEEncoder {
     model_dir: PathBuf,
     model: Arc<Mutex<Option<LaBSEModel>>>,
     tokenizer: Arc<Mutex<Option<tokenizers::Tokenizer>>>,
-    cache: Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    cache: Arc<BoundedCache<String, Vec<f32>>>,
+    loaded: AtomicBool,
     device: Device,
 }
 
@@ -390,51 +399,28 @@ impl LaBSEEncoder {
     ///   If `None`, defaults to `~/.cache/lingo/labse`.
     pub fn new(model_dir: Option<PathBuf>) -> Result<Self> {
         crate::license::require_license_acceptance()?;
-        let model_dir = model_dir.unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".cache/lingo/labse")
-        });
-
-        let device = Self::select_device();
-
-        Ok(Self {
-            model_dir,
-            model: Arc::new(Mutex::new(None)),
-            tokenizer: Arc::new(Mutex::new(None)),
-            cache: Arc::new(Mutex::new(HashMap::new())),
-            device,
-        })
+        let model_dir = match model_dir {
+            Some(d) => d,
+            None => crate::default_model_dir("labse")?,
+        };
+        Ok(Self::build(model_dir, crate::select_device("LaBSE")))
     }
 
     /// Create with an explicit device.
     pub fn with_device(model_dir: PathBuf, device: Device) -> Result<Self> {
-        Ok(Self {
+        crate::license::require_license_acceptance()?;
+        Ok(Self::build(model_dir, device))
+    }
+
+    fn build(model_dir: PathBuf, device: Device) -> Self {
+        Self {
             model_dir,
             model: Arc::new(Mutex::new(None)),
             tokenizer: Arc::new(Mutex::new(None)),
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(BoundedCache::new(EMBED_CACHE_MAX, EMBED_CACHE_MAX_KEY_BYTES)),
+            loaded: AtomicBool::new(false),
             device,
-        })
-    }
-
-    fn select_device() -> Device {
-        #[cfg(feature = "metal")]
-        if cfg!(target_os = "macos") {
-            if let Ok(device) = Device::new_metal(0) {
-                info!("LaBSE: Using Metal GPU");
-                return device;
-            }
         }
-        #[cfg(feature = "cuda")]
-        {
-            if let Ok(device) = Device::new_cuda(0) {
-                info!("LaBSE: Using CUDA GPU");
-                return device;
-            }
-        }
-        info!("LaBSE: Using CPU");
-        Device::Cpu
     }
 
     /// Get the model directory.
@@ -444,16 +430,33 @@ impl LaBSEEncoder {
 
     /// Check if model files exist on disk.
     pub fn is_model_downloaded(&self) -> bool {
-        (self.model_dir.join("model.safetensors").exists()
-            || self.model_dir.join("pytorch_model.bin").exists())
+        self.model_dir.join("model.safetensors").exists()
             && self.model_dir.join("tokenizer.json").exists()
             && self.model_dir.join("config.json").exists()
+    }
+
+    /// True once [`load`](Self::load) has completed successfully.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded.load(Ordering::Acquire)
+    }
+
+    /// After an [`Error::Timeout`](crate::Error::Timeout), wait up to `grace`
+    /// for the abandoned work to stop. It checks for cancellation between
+    /// decode steps / units / windows, so it normally stops within one step.
+    ///
+    /// Returns `true` when the instance is idle and safe to keep using.
+    /// Returns `false` when work still holds the model after `grace`, which
+    /// means it is stuck inside a GPU call (the candle Metal
+    /// `wait_until_completed` hang): drop this instance and build a new one.
+    pub async fn wait_idle(&self, grace: std::time::Duration) -> bool {
+        crate::wait_unlocked(&self.model, grace).await
     }
 
     /// Download LaBSE from HuggingFace Hub to the model directory.
     ///
     /// Downloads `model.safetensors` (~1.8 GB), `config.json`, `tokenizer.json`,
-    /// and `2_Dense/model.safetensors`. Requires the `download` feature.
+    /// and `2_Dense/model.safetensors` from a pinned revision. Requires the
+    /// `download` feature.
     #[cfg(feature = "download")]
     pub fn download_model(&self) -> Result<()> {
         crate::download::download_labse(&self.model_dir)
@@ -479,122 +482,105 @@ impl LaBSEEncoder {
         let config: BertConfig = serde_json::from_str(&config_str)
             .map_err(|e| Error::Inference(format!("Invalid config.json: {}", e)))?;
 
-        // Load tokenizer with truncation (BERT max 512 positions)
+        // No tokenizer truncation: long inputs are encoded in windows of
+        // max_position_embeddings tokens (see crate::windows).
         let tokenizer_path = self.model_dir.join("tokenizer.json");
         let mut tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| Error::Tokenizer(e.to_string()))?;
-
-        let max_len = config.max_position_embeddings;
-        tokenizer.with_truncation(Some(tokenizers::TruncationParams {
-            max_length: max_len,
-            ..Default::default()
-        })).map_err(|e| Error::Tokenizer(format!("Failed to set truncation: {}", e)))?;
+        tokenizer
+            .with_truncation(None)
+            .map_err(|e| Error::Tokenizer(format!("Failed to disable truncation: {}", e)))?;
+        tokenizer.with_padding(None);
 
         // Load weights
-        let weight_files: Vec<PathBuf> = if self.model_dir.join("model.safetensors").exists() {
-            let mut files = vec![self.model_dir.join("model.safetensors")];
-            let dense_path = self.model_dir.join("2_Dense").join("model.safetensors");
-            if dense_path.exists() {
-                files.push(dense_path);
-            }
-            files
-        } else {
-            return Err(Error::ModelNotFound(
-                "model.safetensors not found".to_string(),
-            ));
-        };
+        let weight_path = self.model_dir.join("model.safetensors");
+        if !weight_path.exists() {
+            return Err(Error::ModelNotFound("model.safetensors not found".to_string()));
+        }
+        let mut weight_files = vec![weight_path];
+        let dense_path = self.model_dir.join("2_Dense").join("model.safetensors");
+        if dense_path.exists() {
+            weight_files.push(dense_path);
+        }
 
-        let weight_refs: Vec<&PathBuf> = weight_files.iter().collect();
+        // SAFETY: read-only memory map; the files must not change while loaded.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&weight_refs, DType::F32, &self.device)
+            VarBuilder::from_mmaped_safetensors(&weight_files, DType::F32, &self.device)
                 .map_err(|e| Error::Inference(format!("Failed to load weights: {}", e)))?
         };
 
         let m = LaBSEModel::load(vb, &config)
             .map_err(|e| Error::Inference(format!("Failed to build LaBSE model: {}", e)))?;
 
-        let device_name = format!("{:?}", self.device);
         info!(
-            "LaBSE loaded on {} ({} layers, {} dim, {}K vocab)",
-            device_name, config.num_hidden_layers, config.hidden_size, config.vocab_size / 1000
+            "LaBSE loaded on {:?} ({} layers, {} dim, {}K vocab)",
+            self.device, config.num_hidden_layers, config.hidden_size, config.vocab_size / 1000
         );
 
         *model_guard = Some(m);
-        let mut tok_guard = self.tokenizer.lock().await;
-        *tok_guard = Some(tokenizer);
+        *self.tokenizer.lock().await = Some(tokenizer);
+        self.loaded.store(true, Ordering::Release);
 
         Ok(())
     }
 
     /// Encode text into a 768-dimensional embedding vector.
+    ///
+    /// Inputs longer than the 512-position context are not truncated: the
+    /// content is encoded in consecutive windows (each framed with `[CLS]` /
+    /// `[SEP]`) and the window embeddings are combined as a token-weighted
+    /// mean. Short inputs are a single, unchanged pass.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        {
-            let cache = self.cache.lock().await;
-            if let Some(cached) = cache.get(text) {
-                return Ok(cached.clone());
-            }
+        if let Some(cached) = self.cache.get(&text.to_string()) {
+            return Ok(cached);
         }
 
         self.load().await?;
 
-        let (input_ids_t, token_type_ids_t, attention_mask_t) = {
-            let tok_guard = self.tokenizer.lock().await;
+        let model = Arc::clone(&self.model);
+        let tokenizer = Arc::clone(&self.tokenizer);
+        let device = self.device.clone();
+        let text_owned = text.to_string();
+        let embedding_vec = crate::run_blocking("LaBSE", move |cancel| -> Result<Vec<f32>> {
+            // Lock order (model, then tokenizer) matches `load`.
+            let model_guard = model.blocking_lock();
+            cancel.check()?;
+            let model = model_guard
+                .as_ref()
+                .ok_or_else(|| Error::Inference("Model not loaded".into()))?;
+            let tok_guard = tokenizer.blocking_lock();
             let tokenizer = tok_guard
                 .as_ref()
                 .ok_or_else(|| Error::Inference("Tokenizer not loaded".into()))?;
 
             let encoding = tokenizer
-                .encode(text, true)
+                .encode(text_owned.as_str(), true)
                 .map_err(|e| Error::Tokenizer(e.to_string()))?;
-
-            let input_ids = encoding.get_ids();
-            if input_ids.len() >= 512 {
-                warn!(
-                    "LaBSE: input truncated to 512 tokens (original text was {} chars)",
-                    text.len()
-                );
+            let (lead, trail) = crate::windows::special_frame(encoding.get_special_tokens_mask());
+            let windows = crate::windows::token_windows(encoding.get_ids(), lead, trail, model.max_len);
+            if windows.len() > 1 {
+                debug!("LaBSE: encoding {} windows ({} tokens)", windows.len(), encoding.get_ids().len());
             }
-            let token_type_ids = encoding.get_type_ids();
-            let attention_mask = encoding.get_attention_mask();
 
-            let ids = Tensor::from_vec(
-                input_ids.to_vec(), (1, input_ids.len()), &self.device,
-            ).map_err(|e| Error::Inference(e.to_string()))?;
+            let mut pooled = Vec::with_capacity(windows.len());
+            for window in windows {
+                cancel.check()?;
+                let len = window.ids.len();
+                let run = || -> CandleResult<Vec<f32>> {
+                    let ids = Tensor::from_vec(window.ids.clone(), (1, len), &device)?;
+                    // Single-segment input: token types are all 0.
+                    let types = Tensor::zeros((1, len), DType::U32, &device)?;
+                    let mask = Tensor::ones((1, len), DType::F32, &device)?;
+                    model.encode(&ids, &types, Some(&mask))?.i(0)?.to_vec1()
+                };
+                let embedding = run().map_err(|e| Error::Inference(format!("Encoding failed: {}", e)))?;
+                pooled.push((embedding, window.weight));
+            }
+            Ok(crate::windows::combine(pooled))
+        })
+        .await?;
 
-            let types = Tensor::from_vec(
-                token_type_ids.to_vec(), (1, token_type_ids.len()), &self.device,
-            ).map_err(|e| Error::Inference(e.to_string()))?;
-
-            let mask = Tensor::from_vec(
-                attention_mask.iter().map(|&m| m as f32).collect::<Vec<_>>(),
-                (1, attention_mask.len()), &self.device,
-            ).map_err(|e| Error::Inference(e.to_string()))?;
-
-            (ids, types, mask)
-        };
-
-        let embedding_vec: Vec<f32> = {
-            let model_guard = self.model.lock().await;
-            let model = model_guard
-                .as_ref()
-                .ok_or_else(|| Error::Inference("Model not loaded".into()))?;
-
-            let embeddings = model
-                .encode(&input_ids_t, &token_type_ids_t, Some(&attention_mask_t))
-                .map_err(|e| Error::Inference(format!("Encoding failed: {}", e)))?;
-
-            embeddings
-                .i(0)
-                .map_err(|e| Error::Inference(e.to_string()))?
-                .to_vec1()
-                .map_err(|e| Error::Inference(e.to_string()))?
-        };
-
-        {
-            let mut cache = self.cache.lock().await;
-            cache.insert(text.to_string(), embedding_vec.clone());
-        }
-
+        self.cache.insert(text.to_string(), embedding_vec.clone());
         Ok(embedding_vec)
     }
 
@@ -636,5 +622,28 @@ impl LaBSEEncoder {
             scores.push(self.score(text1, text2).await?);
         }
         Ok(scores)
+    }
+
+    /// Same as [`embed`](Self::embed) but bounded by `timeout`. Returns
+    /// [`crate::Error::Timeout`] if the call does not complete within the
+    /// budget. Call [`wait_idle`](Self::wait_idle) before reusing the encoder
+    /// — see [`crate::SonarEncoder::embed_with_timeout`].
+    pub async fn embed_with_timeout(
+        &self,
+        text: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<f32>> {
+        crate::bounded(timeout, self.embed(text)).await
+    }
+
+    /// Same as [`score`](Self::score) but bounded by `timeout`. See
+    /// [`embed_with_timeout`](Self::embed_with_timeout) for caveats.
+    pub async fn score_with_timeout(
+        &self,
+        text1: &str,
+        text2: &str,
+        timeout: std::time::Duration,
+    ) -> Result<f32> {
+        crate::bounded(timeout, self.score(text1, text2)).await
     }
 }

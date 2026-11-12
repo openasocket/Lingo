@@ -6,7 +6,7 @@ Pure Rust multilingual NLP toolkit built on [candle](https://github.com/huggingf
 
 | Capability | Model | Description |
 |---|---|---|
-| **Translation** | NLLB-200 | Translate between 200+ languages |
+| **Translation** | NLLB-200 | Translate between all 202 NLLB-200 languages |
 | **Similarity** | LaBSE | Cross-lingual semantic similarity scoring (768-dim) |
 | **Similarity** | SONAR | Cross-lingual sentence embeddings (1024-dim) |
 
@@ -112,8 +112,8 @@ lingo score "Hello world" "Bonjour le monde"
 ### Score Similarity (SONAR)
 
 ```bash
-lingo sonar-score "Hello world" "Bonjour le monde"
-# 0.7441
+lingo sonar-score "Hello world" "Bonjour le monde" --lang1 en --lang2 fr
+# 0.8626   (SONAR is language-conditioned; --lang1/--lang2 default to en)
 ```
 
 ### Embed (LaBSE)
@@ -126,15 +126,16 @@ lingo embed "Hello world"
 ### Embed (SONAR)
 
 ```bash
-lingo sonar-embed "Hello world"
+lingo sonar-embed "Hello world" --lang en
 # [0.0123, -0.0456, 0.0789, ...]  (1024 floats)
 ```
 
 ### Download Models
 
 ```bash
-lingo download all     # Download all models
-lingo download sonar   # Download just SONAR
+lingo download all     # Download all models (no license acceptance needed to download)
+lingo download sonar   # Download just SONAR (also upgrades a legacy SONAR tokenizer)
+lingo download labse --model-dir /data/labse   # Custom location
 ```
 
 ### List Languages
@@ -146,8 +147,16 @@ lingo languages
 ## Use as an HTTP Server
 
 ```bash
-cargo run --example server --features server,metal
+LINGO_ACCEPT_LICENSE=1 cargo run --release --example server --features server,metal
+# Listens on 127.0.0.1:3000 (set LINGO_SERVER_ADDR=0.0.0.0:3000 to expose it —
+# there is no authentication, so only do that behind a trusted proxy/firewall)
 ```
+
+Limits are configurable via `LINGO_REQUEST_TIMEOUT_SECS` (300), `LINGO_MAX_PENDING`
+(32), `LINGO_MAX_BATCH` (256) and `LINGO_MAX_TEXT_BYTES` (65536). Over-limit
+input → 400, busy or model unavailable → 503, timeout → 504 (the instance is kept if
+its abandoned work stops within 5 s, and replaced automatically if it is
+wedged in a GPU call).
 
 ### Endpoints
 
@@ -160,7 +169,7 @@ cargo run --example server --features server,metal
 | POST | `/embed_batch` | `{"texts": [...]}` -> batch embeddings |
 | POST | `/analyze` | `{"text", "source", "target"}` -> translation + LaBSE & SONAR scores + chunk_count metadata |
 | POST | `/analyze_batch` | `{"texts": [...], "source", "target"}` -> batch translate + score + per-item chunk_counts |
-| GET | `/health` | Server status |
+| GET | `/health` | `*_loaded` (in memory) and `*_downloaded` (on disk) per model |
 
 ```bash
 curl -X POST http://localhost:3000/translate \
@@ -183,7 +192,7 @@ curl -X POST http://localhost:3000/embed_batch \
 curl -X POST http://localhost:3000/analyze \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "source": "en", "target": "fr"}'
-# {"source_text":"Hello world","translation":"Bonjour le monde","labse_score":0.947,"sonar_score":0.744,"chunk_count":1,...}
+# {"source_text":"Hello world","translation":"Bonjour le monde","labse_score":0.947,"sonar_score":0.863,"chunk_count":1,...}
 
 curl -X POST http://localhost:3000/analyze_batch \
   -H "Content-Type: application/json" \
@@ -236,7 +245,7 @@ print(len(embeddings["embeddings"]))  # 3
 result = analyze("Hello world", "en", "fr")
 print(result["translation"])   # "Bonjour le monde"
 print(result["labse_score"])   # 0.947
-print(result["sonar_score"])   # 0.744
+print(result["sonar_score"])   # 0.863
 print(embeddings["dimensions"])       # 768
 ```
 
@@ -249,18 +258,19 @@ All models auto-download when first used via the CLI. You can also download them
 lingo download all
 
 # Or individually
-lingo download nllb    # NLLB-200 (~1.2 GB from HuggingFace)
-lingo download labse   # LaBSE (~1.8 GB from HuggingFace)
-lingo download sonar   # SONAR (~3 GB, requires Python for conversion)
+lingo download nllb    # NLLB-200 (~2.5 GB F32 from HuggingFace, pinned revision + SHA-256)
+lingo download labse   # LaBSE (~1.8 GB from HuggingFace, SHA-256-verified)
+lingo download sonar   # SONAR (~3 GB, requires Python 3 + torch for conversion)
 ```
 
 ### NLLB-200 (translation)
 
-Auto-downloads from HuggingFace, or convert manually:
+Auto-downloads the F32 safetensors (~2.5 GB) from HuggingFace, or produce a
+smaller F16 copy with (requires `transformers`, `torch`, `safetensors`):
 
 ```bash
-python scripts/convert_nllb_safetensors.py
-# Saves to ~/.cache/lingo/nllb-200-distilled-600M/ (~1.2 GB)
+python3 scripts/convert_nllb_safetensors.py
+# Saves to ~/.cache/lingo/nllb-200-distilled-600M/ (~1.2 GB F16)
 ```
 
 ### LaBSE (similarity/embeddings)
@@ -277,12 +287,20 @@ Auto-downloads from [sentence-transformers/LaBSE](https://huggingface.co/sentenc
 
 ### SONAR (similarity/embeddings)
 
-Auto-downloads from Meta's CDN and converts to safetensors (requires Python 3 with `torch`, `safetensors`, `sentencepiece`, `tokenizers`):
+`lingo download sonar` downloads the checkpoint from Meta's CDN (SHA-256
+verified, loaded with `torch.load(weights_only=True)`) and converts it to
+safetensors; the tokenizer is NLLB-200's `tokenizer.json`, since SONAR shares
+its vocabulary. Requires Python 3 with `torch` and `safetensors`. The script
+can also be run directly:
 
 ```bash
-python scripts/convert_sonar_safetensors.py
-# Downloads from Meta's CDN and saves to ~/.cache/lingo/sonar/ (~3 GB)
+python3 scripts/convert_sonar_safetensors.py
+# Saves model.safetensors + tokenizer.json to ~/.cache/lingo/sonar/ (~3 GB)
 ```
+
+Upgrading from an older lingo: if loading SONAR reports a *legacy SONAR
+tokenizer format*, run `lingo download sonar` once — it keeps the converted
+weights and replaces only the tokenizer.
 
 ## Feature Flags
 
@@ -336,20 +354,29 @@ All benchmarks are release builds (`cargo build --release`), measuring warm infe
 
 **System**: MacBook Pro, M5 Max, 128 GB unified memory, macOS 26.4
 
+NLLB numbers reflect the **KV-cached decoder** released 2026-06 (decoder work
+reduced from O(N²) to O(N) per token — see `ARCHITECTURE.md` "KV Cache").
+
 | Operation | Time | Notes |
 |-----------|------|-------|
-| NLLB translation (short, warm) | ~85ms | Cached encoder, subsequent targets |
-| NLLB translation (short, cold) | ~136ms | First target in invocation |
-| NLLB translation (paragraph, 3 targets) | ~810ms avg | 40-word input |
-| NLLB multi-target (10 languages) | ~1.14s total | Single invocation |
-| NLLB model load | ~440ms | F16 weights |
-| NLLB cold start (load + first translate) | ~660ms | |
-| LaBSE similarity (per pair) | ~100ms | Custom BERT encoder |
-| LaBSE model load | ~385ms | |
-| LaBSE cold start (load + first score) | ~500ms | |
-| SONAR similarity (per pair) | ~28ms | 24-layer transformer encoder |
-| SONAR model load | ~449ms | F32 weights |
-| SONAR cold start (load + first score) | ~501ms | |
+| NLLB translation (short, warm) | ~87ms | 8-token input, cached encoder reused across targets |
+| NLLB translation (short, cold) | ~117ms | First target in invocation |
+| NLLB translation (paragraph, 3 targets) | ~534ms avg | 40-word input — was ~810ms pre-KV-cache |
+| NLLB multi-target (10 languages) | ~337ms total | Single invocation — was ~1.14s pre-KV-cache |
+| NLLB model load | ~521ms | F32 weights (Metal F16 kernel coverage incomplete) |
+| NLLB cold start (load + first translate) | ~638ms | |
+| LaBSE similarity (per pair) | ~11ms | Custom BERT encoder |
+| LaBSE model load | ~433ms | |
+| LaBSE cold start (load + first score) | ~534ms | |
+| SONAR similarity (per pair) | ~30ms | 24-layer transformer encoder |
+| SONAR model load | ~452ms | F32 weights |
+| SONAR cold start (load + first score) | ~562ms | |
+
+Short-input timings are unchanged (an 8-token input has too few output tokens
+for O(N²) → O(N) to matter). The win shows up on **longer outputs**:
+paragraph translations are ~34% faster and 10-target multi-translation is
+~3.4× faster. Bulk backfill workloads with 400-token-class chunks see the
+largest gains.
 
 ### Apple M5 Max — Accelerate (CPU SIMD)
 
@@ -384,14 +411,15 @@ Scores are cosine similarity of L2-normalized 768-dim embeddings. Identical on C
 
 ### Cross-Lingual Similarity Scores (SONAR)
 
-Scores are cosine similarity of L2-normalized 1024-dim embeddings. Identical on CPU and GPU.
+Scores are cosine similarity of L2-normalized 1024-dim embeddings, with each
+text's language passed (`--lang1`/`--lang2`). Measured on Metal.
 
 | Text 1 | Text 2 | Score |
 |--------|--------|-------|
-| "Hello world" | "Bonjour le monde" (fr) | 0.744 |
-| "Hello world" | "Hola mundo" (es) | 0.753 |
-| "Hello world" | "こんにちは世界" (ja) | 0.699 |
-| "The cat sat on the mat" | "The dog ran in the park" | 0.168 |
+| "Hello world" | "Bonjour le monde" (fr) | 0.863 |
+| "Hello world" | "Hola mundo" (es) | 0.922 |
+| "Hello world" | "こんにちは世界" (ja) | 0.815 |
+| "The cat sat on the mat" | "The dog ran in the park" | 0.503 |
 | "I love programming" | "I love programming" | 1.000 |
 
 ## Long-input handling

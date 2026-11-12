@@ -59,7 +59,15 @@ impl NllbConfig {
 // Sinusoidal positional embeddings (M2M100 / NLLB style, offset=2)
 // ---------------------------------------------------------------------------
 
-fn sinusoidal_embeddings(
+/// Row `p` of the returned `(max_len + offset, d_model)` table encodes
+/// position `p`; callers index from `offset` (2 for M2M100/fairseq models,
+/// whose positions start at `padding_idx + 1`).
+///
+/// Frequencies follow the tensor2tensor/fairseq convention used by both HF
+/// `M2M100SinusoidalPositionalEmbedding` and fairseq2
+/// `SinusoidalPositionEncoder`: `freq_i = exp(-i * ln(10000) / (half - 1))`,
+/// sin in the first half, cos in the second.
+pub(crate) fn sinusoidal_embeddings(
     max_len: usize,
     d_model: usize,
     offset: usize,
@@ -69,10 +77,11 @@ fn sinusoidal_embeddings(
     let total = max_len + offset;
     let mut data = vec![0f32; total * d_model];
     let half = d_model / 2;
+    let step = (10000f64).ln() / (half.max(2) - 1) as f64;
 
     for pos in 0..total {
         for i in 0..half {
-            let angle = (pos as f64) / (10000f64).powf(2.0 * i as f64 / d_model as f64);
+            let angle = (pos as f64) * (-(i as f64) * step).exp();
             data[pos * d_model + i] = angle.sin() as f32;
             data[pos * d_model + half + i] = angle.cos() as f32;
         }
@@ -339,11 +348,10 @@ impl DecoderLayer {
     ///
     /// - Self-attention reads/writes `cache.self_attn_kv`: the cached prefix is
     ///   passed as `past_kv`, and the returned (concatenated) K/V is stored back.
-    /// - Cross-attention reads/writes `cache.cross_attn_kv`. In this phase the
-    ///   encoder K/V are *recomputed* every step (we still pass the encoder
-    ///   output and an empty cache from the full-prefix `decode` path), so the
-    ///   result is functionally correct but not yet optimized — that lands in
-    ///   KV-CACHE-03.
+    /// - Cross-attention reads/writes `cache.cross_attn_kv`. When the slot was
+    ///   filled by `NllbModel::precompute_cross_attn_kv` the encoder K/V are
+    ///   reused verbatim; an empty slot (e.g. the cache-less `decode` path)
+    ///   projects them from `encoder_output` on the spot.
     /// - The FFN block is unchanged from the pre-cache implementation.
     fn forward(
         &self,
@@ -385,9 +393,9 @@ pub struct LayerCache {
     /// Self-attention K and V from all prior decode steps for this layer.
     /// Shape (b, num_heads, seq_so_far, head_dim). None on first step.
     pub self_attn_kv: Option<(Tensor, Tensor)>,
-    /// Cross-attention K and V — computed once from encoder output,
-    /// reused across all decode steps for this layer. None until
-    /// KV-CACHE-03 fills it.
+    /// Cross-attention K and V — computed once from encoder output (see
+    /// `NllbModel::precompute_cross_attn_kv`) and reused across all decode
+    /// steps for this layer. None until filled.
     pub cross_attn_kv: Option<(Tensor, Tensor)>,
 }
 
@@ -409,6 +417,43 @@ impl DecoderCache {
             .map(|(k, _)| k.dim(2).unwrap_or(0))
             .unwrap_or(0)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Generation stop reasons and repetition-loop detection
+// ---------------------------------------------------------------------------
+
+/// Why greedy generation stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    /// The model emitted EOS — normal completion.
+    Eos,
+    /// The output budget / position table ran out before EOS.
+    Budget,
+    /// The output entered a repeated-token loop; the repeated tail beyond one
+    /// period was dropped.
+    Repetition,
+    /// The caller's cancel check returned true; the output is partial.
+    Cancelled,
+}
+
+/// Detect a degenerate repeated-token loop at the end of `tokens`.
+///
+/// For each period `p` in 1..=64 (and at most a quarter of the output), the
+/// loop is confirmed when the last `max(ceil(64/p), 4) * p` tokens consist of
+/// one `p`-token chunk repeated. Returns how many trailing tokens to drop so
+/// that exactly one period remains, or `None` when there is no loop.
+pub(crate) fn repetition_tail(tokens: &[u32]) -> Option<usize> {
+    (1..=64.min(tokens.len() / 4)).find_map(|period| {
+        let evidence = 64usize.div_ceil(period).max(4) * period;
+        if tokens.len() < evidence {
+            return None;
+        }
+        let tail = &tokens[tokens.len() - evidence..];
+        tail.chunks_exact(period)
+            .all(|chunk| chunk == &tail[..period])
+            .then_some(evidence - period)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +570,7 @@ impl NllbModel {
     /// `cache` is `None`, a throw-away cache is allocated locally so external
     /// callers see identical behavior to the pre-cache implementation (every
     /// call recomputes the full prefix, contents discarded). The per-step
-    /// incremental decode loop is wired up in KV-CACHE-04.
+    /// incremental hot path is `decode_step`.
     pub fn decode(
         &self,
         decoder_input_ids: &Tensor,
@@ -620,12 +665,13 @@ impl NllbModel {
         self.lm_head.forward(&x)
     }
 
-    pub fn generate(
+    pub(crate) fn generate(
         &self,
         encoder_output: &Tensor,
         forced_bos_token_id: u32,
         max_length: usize,
-    ) -> CandleResult<Vec<u32>> {
+        cancelled: &dyn Fn() -> bool,
+    ) -> CandleResult<(Vec<u32>, StopReason)> {
         let device = encoder_output.device();
 
         // 1. Fresh cache; precompute every decoder layer's cross-attention K/V
@@ -661,14 +707,23 @@ impl NllbModel {
         let max_safe = self.config.max_position_embeddings.saturating_sub(1);
         let effective_max = max_length.min(max_safe);
         let mut output_tokens: Vec<u32> = Vec::with_capacity(effective_max);
-        let mut saw_eos = false;
+        let mut stop = StopReason::Budget;
 
         for step in 0..effective_max {
+            if cancelled() {
+                stop = StopReason::Cancelled;
+                break;
+            }
             if next_token == self.config.eos_token_id {
-                saw_eos = true;
+                stop = StopReason::Eos;
                 break;
             }
             output_tokens.push(next_token);
+            if let Some(drop) = repetition_tail(&output_tokens) {
+                output_tokens.truncate(output_tokens.len() - drop);
+                stop = StopReason::Repetition;
+                break;
+            }
 
             // Feed the just-emitted token through one incremental step to predict
             // the following one (and extend the self-attn cache). Skip when the
@@ -685,15 +740,16 @@ impl NllbModel {
                 .to_vec1::<u32>()?[0];
         }
 
-        if !saw_eos && cache.self_attn_seq_len() >= self.config.max_position_embeddings {
+        if stop == StopReason::Budget {
             warn!(
                 target: "lingo::nllb",
                 generated_tokens = output_tokens.len(),
-                "decoder hit position-embedding ceiling without emitting EOS — output may be truncated"
+                max_length = effective_max,
+                "decoder hit its output budget without emitting EOS — output may be truncated"
             );
         }
 
-        Ok(output_tokens)
+        Ok((output_tokens, stop))
     }
 
     /// Reference (pre-KV-cache) generation — the original full-prefix loop.
@@ -714,12 +770,13 @@ impl NllbModel {
     /// `generate`. Marked `#[doc(hidden)]` to discourage external use while
     /// remaining importable within the crate.
     #[doc(hidden)]
-    pub fn generate_reference(
+    pub(crate) fn generate_reference(
         &self,
         encoder_output: &Tensor,
         forced_bos_token_id: u32,
         max_length: usize,
-    ) -> CandleResult<Vec<u32>> {
+        cancelled: &dyn Fn() -> bool,
+    ) -> CandleResult<(Vec<u32>, StopReason)> {
         let device = encoder_output.device();
         let mut token_ids: Vec<u32> =
             vec![self.config.decoder_start_token_id, forced_bos_token_id];
@@ -730,7 +787,12 @@ impl NllbModel {
         let max_safe = self.config.max_position_embeddings.saturating_sub(1);
         let effective_max = max_length.min(max_safe);
 
+        let mut stop = StopReason::Budget;
         for _ in 0..effective_max {
+            if cancelled() {
+                stop = StopReason::Cancelled;
+                break;
+            }
             let decoder_input =
                 Tensor::from_vec(token_ids.clone(), (1, token_ids.len()), device)?;
 
@@ -742,14 +804,22 @@ impl NllbModel {
             let next_token = last_logits.argmax(D::Minus1)?.to_vec1::<u32>()?[0];
 
             if next_token == self.config.eos_token_id {
+                stop = StopReason::Eos;
                 break;
             }
 
             token_ids.push(next_token);
+            // Same repetition guard as `generate`, so both paths stop on the
+            // identical token.
+            if let Some(drop) = repetition_tail(&token_ids[2..]) {
+                token_ids.truncate(token_ids.len() - drop);
+                stop = StopReason::Repetition;
+                break;
+            }
         }
 
         // Drop the 2-token seed; return only the generated tokens.
-        Ok(token_ids[2..].to_vec())
+        Ok((token_ids[2..].to_vec(), stop))
     }
 }
 
@@ -1233,10 +1303,12 @@ mod tests {
                 Tensor::randn(0f32, 1f32, (1usize, enc_len, cfg.d_model), &device).unwrap();
             let forced_bos = 3u32;
 
-            let cached = model.generate(&encoder_output, forced_bos, 16).unwrap();
+            let cached = model.generate(&encoder_output, forced_bos, 16, &|| false).unwrap();
             let reference = model
-                .generate_reference(&encoder_output, forced_bos, 16)
+                .generate_reference(&encoder_output, forced_bos, 16, &|| false)
                 .unwrap();
+            assert_eq!(cached.1, reference.1, "stop reasons diverged for enc_len={enc_len}");
+            let (cached, reference) = (cached.0, reference.0);
 
             assert_eq!(
                 cached, reference,
@@ -1253,7 +1325,7 @@ mod tests {
         let model = build_tiny_model(&cfg, &device);
         let encoder_output = Tensor::randn(0f32, 1f32, (1usize, 4usize, cfg.d_model), &device).unwrap();
 
-        let out = model.generate_reference(&encoder_output, 3u32, 16).unwrap();
+        let (out, _) = model.generate_reference(&encoder_output, 3u32, 16, &|| false).unwrap();
 
         assert!(
             !out.contains(&cfg.eos_token_id),
@@ -1261,6 +1333,19 @@ mod tests {
         );
         // The seed tokens (decoder_start, forced_bos) must not be returned as
         // generated output positions 0/1 — i.e. the [2..] slice was applied.
-        assert!(out.len() <= cfg.max_position_embeddings - 1);
+        assert!(out.len() < cfg.max_position_embeddings);
+    }
+
+    #[test]
+    fn repetition_tail_detects_loops_and_keeps_one_period() {
+        assert_eq!(repetition_tail(&[7; 64]), Some(63));
+        assert_eq!(repetition_tail(&[1, 2, 3, 4].repeat(16)), Some(60));
+        assert_eq!(repetition_tail(&[1, 2, 3, 4].repeat(3)), None);
+        assert_eq!(repetition_tail(&(0..200).collect::<Vec<_>>()), None);
+        let mut tokens: Vec<u32> = (0..100).collect();
+        tokens.extend([8, 9].repeat(32));
+        let drop = repetition_tail(&tokens).unwrap();
+        tokens.truncate(tokens.len() - drop);
+        assert_eq!(&tokens[100..], &[8, 9]);
     }
 }
