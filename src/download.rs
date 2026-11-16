@@ -76,8 +76,16 @@ const LABSE_FILES: &[HfFile] = &[
         revision: LABSE_REVISION,
         sha256: Some("77d8e1f2dbab6eb5d3c261ce9d3dbf1e3c69e02938c95f934f94f42c22dfa31f"),
     },
-    HfFile { name: "config.json", revision: LABSE_REVISION, sha256: None },
-    HfFile { name: "tokenizer.json", revision: LABSE_REVISION, sha256: None },
+    HfFile {
+        name: "config.json",
+        revision: LABSE_REVISION,
+        sha256: None,
+    },
+    HfFile {
+        name: "tokenizer.json",
+        revision: LABSE_REVISION,
+        sha256: None,
+    },
     HfFile {
         name: "2_Dense/model.safetensors",
         revision: LABSE_REVISION,
@@ -128,7 +136,10 @@ pub fn download_sonar(output_dir: &Path) -> Result<()> {
             ));
         }
     } else {
-        info!("SONAR weights already converted at {}", model_file.display());
+        info!(
+            "SONAR weights already converted at {}",
+            model_file.display()
+        );
     }
 
     if tokenizer_file.exists() && !is_legacy_sonar_tokenizer(&tokenizer_file) {
@@ -186,7 +197,10 @@ fn run_sonar_conversion(output_dir: &Path) -> Result<()> {
     ));
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&script)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&script)?;
         f.write_all(SONAR_CONVERT_SCRIPT.as_bytes())?;
     }
 
@@ -256,7 +270,12 @@ fn fetch_hf_file(
         std::fs::create_dir_all(parent)?;
     }
 
-    info!("Downloading {} from {}@{}...", file.name, repo_id, short_rev(file.revision));
+    info!(
+        "Downloading {} from {}@{}...",
+        file.name,
+        repo_id,
+        short_rev(file.revision)
+    );
     let repo = api.repo(hf_hub::Repo::with_revision(
         repo_id.to_string(),
         hf_hub::RepoType::Model,
@@ -283,7 +302,11 @@ fn fetch_hf_file(
     place_file(&cached_path, target, replace)?;
 
     let size = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);
-    info!("Downloaded {} ({:.1} MB)", file.name, size as f64 / 1_000_000.0);
+    info!(
+        "Downloaded {} ({:.1} MB)",
+        file.name,
+        size as f64 / 1_000_000.0
+    );
     Ok(())
 }
 
@@ -303,7 +326,11 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Put `src` at `dst` via a staged temp path + rename, so `dst` either does
@@ -326,7 +353,10 @@ fn place_file(src: &Path, dst: &Path, replace: bool) -> Result<()> {
 }
 
 fn staging_path(dst: &Path) -> PathBuf {
-    let mut name = dst.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = dst
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(".part");
     dst.with_file_name(name)
 }

@@ -210,6 +210,10 @@ Endpoints (source: `examples/server.rs`):
 | POST | `/score` | `{text1, text2}` | `{score, duration_ms}` (LaBSE) |
 | POST | `/embed` | `{text}` | `{embedding, dimensions}` (LaBSE, 768-dim) |
 | POST | `/embed_batch` | `{texts: [...]}` | `{embeddings, dimensions, count}` |
+| POST | `/labse/score`, `/labse/embed`, `/labse/embed_batch` | as above | aliases of `/score`, `/embed`, `/embed_batch` |
+| POST | `/sonar/embed` | `{text, lang?}` (`lang` ISO/NLLB code, default `en`) | `{embedding, dim, dimensions, duration_ms}` (SONAR, 1024-dim, L2-normalized) |
+| POST | `/sonar/embed_batch` | `{texts: [...], lang?}` | `{embeddings, count, dim, dimensions, duration_ms}` |
+| POST | `/sonar/score` | `{text1, text2, lang1?, lang2?}` | `{score, duration_ms}` (`SonarEncoder::score_langs`) |
 | POST | `/analyze` | `{text, source, target}` | translation + LaBSE *and* SONAR scores (SONAR uses `source`/`target` as the two texts' languages), plus `chunk_count` |
 | POST | `/analyze_batch` | `{texts: [...], source, target}` | batched `/analyze`; each `results[i]` carries its own `chunk_count` |
 
@@ -394,6 +398,8 @@ scripts/
   convert_sonar_safetensors.py   Meta CDN -> safetensors for SONAR (embedded in the binary)
 tests/
   kv_cache_equivalence.rs        KV-cached vs full-prefix decode (real model, #[ignore])
+  server_endpoints.rs            /sonar/* + /labse/* against the real server binary and models (#[ignore];
+                                 `cargo build --release --example server --features server,metal` first)
 ARCHITECTURE.md   Metal workarounds, M2M100 quirks, dtype rules
 ```
 

@@ -30,12 +30,24 @@ async fn kv_cached_generate_matches_reference() {
     let cases = [
         ("Hello world", "en", "fr"),
         ("The quick brown fox jumps over the lazy dog.", "en", "es"),
-        ("Machine learning has transformed natural language processing.", "en", "de"),
+        (
+            "Machine learning has transformed natural language processing.",
+            "en",
+            "de",
+        ),
         ("Bonjour, comment allez-vous aujourd'hui ?", "fr", "en"),
         ("Hola, ¿cómo estás?", "es", "en"),
         ("こんにちは、お元気ですか？", "ja", "en"),
-        ("La inteligencia artificial está cambiando el mundo.", "es", "en"),
-        ("Die Wissenschaft entwickelt sich rasant weiter.", "de", "en"),
+        (
+            "La inteligencia artificial está cambiando el mundo.",
+            "es",
+            "en",
+        ),
+        (
+            "Die Wissenschaft entwickelt sich rasant weiter.",
+            "de",
+            "en",
+        ),
         ("人工智能正在改变世界。", "zh", "en"),
         ("기계 학습은 흥미로운 분야입니다.", "ko", "en"),
         // longer/varied:
@@ -84,13 +96,20 @@ async fn kv_cached_generate_matches_reference() {
             "en",
             "hi",
         ),
-        ("Mathematics is the universal language of science.", "en", "it"),
+        (
+            "Mathematics is the universal language of science.",
+            "en",
+            "it",
+        ),
     ];
 
     let mut divergences = Vec::new();
     for (text, src, tgt) in &cases {
         let cached = translator.translate(text, src, tgt).await.unwrap();
-        let reference = translator.translate_reference(text, src, tgt).await.unwrap();
+        let reference = translator
+            .translate_reference(text, src, tgt)
+            .await
+            .unwrap();
         if cached.text != reference.text {
             divergences.push(format!(
                 "{} -> {}: cached={:?}, reference={:?}",

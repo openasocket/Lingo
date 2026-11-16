@@ -134,10 +134,16 @@ fn split_on_line_breaks(s: &str) -> Vec<Chunk> {
             }
             let run: String = chars[start..i].iter().collect();
             if run.contains('\n') && !cur.trim().is_empty() && i < chars.len() {
-                out.push(Chunk { text: std::mem::take(&mut cur), trailing_separator: run });
+                out.push(Chunk {
+                    text: std::mem::take(&mut cur),
+                    trailing_separator: run,
+                });
             } else if run.contains('\n') && !cur.trim().is_empty() {
                 // Trailing newline run at the very end: keep as separator.
-                out.push(Chunk { text: std::mem::take(&mut cur), trailing_separator: run });
+                out.push(Chunk {
+                    text: std::mem::take(&mut cur),
+                    trailing_separator: run,
+                });
             } else {
                 cur.push_str(&run);
             }
@@ -147,7 +153,10 @@ fn split_on_line_breaks(s: &str) -> Vec<Chunk> {
         }
     }
     if !cur.is_empty() || out.is_empty() {
-        out.push(Chunk { text: cur, trailing_separator: String::new() });
+        out.push(Chunk {
+            text: cur,
+            trailing_separator: String::new(),
+        });
     }
     out
 }
@@ -431,8 +440,19 @@ mod tests {
         let text = "First one. Second one!\nHeading without period\n\nLast line";
         let units = sentence_units(text);
         let texts: Vec<&str> = units.iter().map(|u| u.text.as_str()).collect();
-        assert_eq!(texts, ["First one.", "Second one!", "Heading without period", "Last line"]);
-        let rebuilt: String = units.iter().map(|u| format!("{}{}", u.text, u.trailing_separator)).collect();
+        assert_eq!(
+            texts,
+            [
+                "First one.",
+                "Second one!",
+                "Heading without period",
+                "Last line"
+            ]
+        );
+        let rebuilt: String = units
+            .iter()
+            .map(|u| format!("{}{}", u.text, u.trailing_separator))
+            .collect();
         assert_eq!(rebuilt, text);
     }
 
@@ -454,7 +474,7 @@ mod tests {
             let end = index + ch.len_utf8();
             let boundary = matches!(ch, '\n' | '。' | '！' | '？')
                 || (matches!(ch, '.' | '!' | '?')
-                    && text[end..].chars().next().map_or(true, char::is_whitespace));
+                    && text[end..].chars().next().is_none_or(char::is_whitespace));
             if boundary && !text[start..end].trim().is_empty() {
                 parts.push(&text[start..end]);
                 start = end;
@@ -473,7 +493,10 @@ mod tests {
             .map(|u| u.text.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let fork: Vec<String> = fork_sentence_segments(text).iter().map(|s| s.trim().to_string()).collect();
+        let fork: Vec<String> = fork_sentence_segments(text)
+            .iter()
+            .map(|s| s.trim().to_string())
+            .collect();
         (lingo, fork)
     }
 
@@ -512,7 +535,11 @@ mod tests {
     fn chunk_text_does_not_split_inside_an_email() {
         // One token per word; budget 3 forces sentence-level packing.
         let count = |s: &str| s.split_whitespace().count();
-        let chunks = chunk_text("mail a.Bob@x.com today.", &ChunkerConfig { max_tokens: 3 }, count);
+        let chunks = chunk_text(
+            "mail a.Bob@x.com today.",
+            &ChunkerConfig { max_tokens: 3 },
+            count,
+        );
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "mail a.Bob@x.com today.");
     }

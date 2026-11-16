@@ -27,7 +27,12 @@ pub(crate) struct TokenWindow {
 /// - `lead` / `trail`: how many special tokens frame the content at the start
 ///   and end of `ids`; every window repeats them
 /// - `max_len`: model context length in tokens
-pub(crate) fn token_windows(ids: &[u32], lead: usize, trail: usize, max_len: usize) -> Vec<TokenWindow> {
+pub(crate) fn token_windows(
+    ids: &[u32],
+    lead: usize,
+    trail: usize,
+    max_len: usize,
+) -> Vec<TokenWindow> {
     let lead = lead.min(ids.len());
     let trail = trail.min(ids.len() - lead);
     let body = &ids[lead..ids.len() - trail];
@@ -35,7 +40,10 @@ pub(crate) fn token_windows(ids: &[u32], lead: usize, trail: usize, max_len: usi
     let capacity = max_len.saturating_sub(lead + trail).max(1);
 
     if ids.len() <= max_len || body.len() <= capacity {
-        return vec![TokenWindow { ids: ids.to_vec(), weight: body.len().max(1) }];
+        return vec![TokenWindow {
+            ids: ids.to_vec(),
+            weight: body.len().max(1),
+        }];
     }
 
     body.chunks(capacity)
@@ -44,7 +52,10 @@ pub(crate) fn token_windows(ids: &[u32], lead: usize, trail: usize, max_len: usi
             window.extend_from_slice(&ids[..lead]);
             window.extend_from_slice(chunk);
             window.extend_from_slice(&ids[ids.len() - trail..]);
-            TokenWindow { ids: window, weight: chunk.len() }
+            TokenWindow {
+                ids: window,
+                weight: chunk.len(),
+            }
         })
         .collect()
 }
@@ -53,7 +64,11 @@ pub(crate) fn token_windows(ids: &[u32], lead: usize, trail: usize, max_len: usi
 /// (1 = special).
 pub(crate) fn special_frame(special_mask: &[u32]) -> (usize, usize) {
     let lead = special_mask.iter().take_while(|&&m| m == 1).count();
-    let trail = special_mask[lead..].iter().rev().take_while(|&&m| m == 1).count();
+    let trail = special_mask[lead..]
+        .iter()
+        .rev()
+        .take_while(|&&m| m == 1)
+        .count();
     (lead, trail)
 }
 
@@ -61,7 +76,11 @@ pub(crate) fn special_frame(special_mask: &[u32]) -> (usize, usize) {
 /// A single embedding is returned unchanged.
 pub(crate) fn combine(embeddings: Vec<(Vec<f32>, usize)>) -> Vec<f32> {
     if embeddings.len() == 1 {
-        return embeddings.into_iter().next().map(|(e, _)| e).unwrap_or_default();
+        return embeddings
+            .into_iter()
+            .next()
+            .map(|(e, _)| e)
+            .unwrap_or_default();
     }
     let dim = embeddings.first().map(|(e, _)| e.len()).unwrap_or(0);
     let mut sum = vec![0f32; dim];
@@ -85,7 +104,13 @@ mod tests {
     fn short_input_is_a_single_identical_window() {
         let ids = [101, 5, 6, 7, 102];
         let w = token_windows(&ids, 1, 1, 512);
-        assert_eq!(w, vec![TokenWindow { ids: ids.to_vec(), weight: 3 }]);
+        assert_eq!(
+            w,
+            vec![TokenWindow {
+                ids: ids.to_vec(),
+                weight: 3
+            }]
+        );
     }
 
     #[test]
@@ -100,7 +125,10 @@ mod tests {
             assert_eq!(win.ids.last(), Some(&3));
             assert!(win.ids.len() <= 6);
         }
-        let content: Vec<u32> = w.iter().flat_map(|x| x.ids[1..x.ids.len() - 1].to_vec()).collect();
+        let content: Vec<u32> = w
+            .iter()
+            .flat_map(|x| x.ids[1..x.ids.len() - 1].to_vec())
+            .collect();
         assert_eq!(content, (0..10).collect::<Vec<_>>());
         assert_eq!(w.iter().map(|x| x.weight).sum::<usize>(), 10);
     }

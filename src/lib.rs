@@ -55,8 +55,8 @@ pub use chunker::{chunk_text, sentence_units, Chunk, ChunkerConfig};
 pub use error::{DegenerateKind, Error, Result};
 pub use labse::LaBSEEncoder;
 pub use languages::NllbLanguage;
-pub use model::{DecoderCache, LayerCache};
 pub use license::{check_license_acceptance, license_notice, mark_license_accepted};
+pub use model::{DecoderCache, LayerCache};
 pub use sonar::SonarEncoder;
 
 use cache::BoundedCache;
@@ -181,7 +181,10 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
     job: impl FnOnce(&CancelFlag) -> Result<T> + Send + 'static,
 ) -> Result<T> {
     let flag = CancelFlag::default();
-    let mut guard = CancelOnDrop { flag: flag.clone(), armed: true };
+    let mut guard = CancelOnDrop {
+        flag: flag.clone(),
+        armed: true,
+    };
     let result = tokio::task::spawn_blocking(move || job(&flag)).await;
     guard.armed = false;
     result.map_err(|e| join_error(what, e))?
@@ -266,7 +269,10 @@ impl TranslateConfig {
 fn has_dangling_clause(source: &str, translated: &str, target: NllbLanguage) -> bool {
     let (source, translated) = (source.trim_end(), translated.trim_end());
     // Greek writes the question mark as `;` (or U+037E GREEK QUESTION MARK).
-    if target == NllbLanguage::Greek && source.ends_with('?') && translated.ends_with([';', '\u{037E}']) {
+    if target == NllbLanguage::Greek
+        && source.ends_with('?')
+        && translated.ends_with([';', '\u{037E}'])
+    {
         return false;
     }
     source.ends_with(['.', '!', '?', '。', '！', '？'])
@@ -346,8 +352,12 @@ impl NllbTranslator {
         *self.config.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn model_dir(&self) -> &Path { &self.model_dir }
-    pub fn device(&self) -> &Device { &self.device }
+    pub fn model_dir(&self) -> &Path {
+        &self.model_dir
+    }
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
 
     /// True when the model files are present on disk.
     pub fn is_model_downloaded(&self) -> bool {
@@ -397,7 +407,8 @@ impl NllbTranslator {
             .map_err(|e| Error::Tokenizer(e.to_string()))?;
         if tokenizer.token_to_id("</s>").is_none() || tokenizer.token_to_id("eng_Latn").is_none() {
             return Err(Error::Tokenizer(
-                "tokenizer.json is not an NLLB-200 tokenizer (missing </s> or language tokens)".into(),
+                "tokenizer.json is not an NLLB-200 tokenizer (missing </s> or language tokens)"
+                    .into(),
             ));
         }
 
@@ -410,7 +421,11 @@ impl NllbTranslator {
 
         // Metal has incomplete F16 kernel coverage — use F32 there.
         // CUDA can use F16 for lower memory usage; CPU stays F32.
-        let dtype = if self.device.is_cuda() { DType::F16 } else { DType::F32 };
+        let dtype = if self.device.is_cuda() {
+            DType::F16
+        } else {
+            DType::F32
+        };
         // SAFETY: the safetensors file is memory-mapped read-only; it must not
         // be modified while the model is alive (same contract as candle).
         let vb = unsafe {
@@ -439,8 +454,14 @@ impl NllbTranslator {
     ///
     /// Splitting and output checks follow the translator's
     /// [`TranslateConfig`] (see [`set_config`](Self::set_config)).
-    pub async fn translate(&self, text: &str, source_lang: &str, target_lang: &str) -> Result<TranslationResult> {
-        self.translate_inner(text, source_lang, target_lang, false).await
+    pub async fn translate(
+        &self,
+        text: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<TranslationResult> {
+        self.translate_inner(text, source_lang, target_lang, false)
+            .await
     }
 
     /// Reference (pre-KV-cache) twin of [`translate`](Self::translate), kept for
@@ -454,8 +475,14 @@ impl NllbTranslator {
     /// writes its own results back (which would poison the cache for production
     /// `translate` calls). Production code should always call `translate`.
     #[doc(hidden)]
-    pub async fn translate_reference(&self, text: &str, source_lang: &str, target_lang: &str) -> Result<TranslationResult> {
-        self.translate_inner(text, source_lang, target_lang, true).await
+    pub async fn translate_reference(
+        &self,
+        text: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<TranslationResult> {
+        self.translate_inner(text, source_lang, target_lang, true)
+            .await
     }
 
     /// Shared body for [`translate`](Self::translate) and
@@ -465,7 +492,13 @@ impl NllbTranslator {
     /// bounded translation cache. `reference == true` selects the full-prefix
     /// `generate_reference` path and disables all cache reads/writes so the two
     /// paths stay independent for verification.
-    async fn translate_inner(&self, text: &str, source_lang: &str, target_lang: &str, reference: bool) -> Result<TranslationResult> {
+    async fn translate_inner(
+        &self,
+        text: &str,
+        source_lang: &str,
+        target_lang: &str,
+        reference: bool,
+    ) -> Result<TranslationResult> {
         let start = Instant::now();
         let use_cache = !reference;
 
@@ -508,15 +541,21 @@ impl NllbTranslator {
             reference,
             config,
         };
-        let (translated_text, chunk_count) = run_blocking("translation", move |cancel| job.run(cancel)).await?;
+        let (translated_text, chunk_count) =
+            run_blocking("translation", move |cancel| job.run(cancel)).await?;
 
         // Cache the full-input result as well, so a repeat of the identical long
         // input is served without re-chunking. Skipped on the reference path.
         if use_cache {
-            self.cache.insert(cache_key, (translated_text.clone(), chunk_count));
+            self.cache
+                .insert(cache_key, (translated_text.clone(), chunk_count));
         }
 
-        Ok(result(translated_text, start.elapsed().as_millis() as u64, chunk_count))
+        Ok(result(
+            translated_text,
+            start.elapsed().as_millis() as u64,
+            chunk_count,
+        ))
     }
 
     /// Same as [`translate`](Self::translate) but bounded by `timeout`.
@@ -553,12 +592,18 @@ impl NllbTranslator {
 
 /// Resolve an ISO or NLLB code to one of NLLB-200's languages.
 fn resolve_language(code: &str, source: &str, target: &str) -> Result<NllbLanguage> {
-    NllbLanguage::resolve(code).ok_or_else(|| Error::InvalidLanguagePair(source.into(), target.into()))
+    NllbLanguage::resolve(code)
+        .ok_or_else(|| Error::InvalidLanguagePair(source.into(), target.into()))
 }
 
 /// Cache key on canonical NLLB codes, so `en`/`eng` share entries. The unit
 /// separator cannot be confused with ordinary text.
-fn translation_cache_key(text: &str, src: NllbLanguage, tgt: NllbLanguage, config: &TranslateConfig) -> String {
+fn translation_cache_key(
+    text: &str,
+    src: NllbLanguage,
+    tgt: NllbLanguage,
+    config: &TranslateConfig,
+) -> String {
     let mode = format!(
         "{}{}{}{}",
         config.per_sentence as u8,
@@ -566,7 +611,13 @@ fn translation_cache_key(text: &str, src: NllbLanguage, tgt: NllbLanguage, confi
         config.reject_dangling_clause as u8,
         config.reject_repetition as u8
     );
-    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}", src.nllb_code(), tgt.nllb_code(), mode, text)
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        src.nllb_code(),
+        tgt.nllb_code(),
+        mode,
+        text
+    )
 }
 
 /// Token IDs that frame an NLLB encoder input and select the output language.
@@ -597,9 +648,13 @@ impl TranslateJob {
         let model_guard = self.model.blocking_lock();
         // The caller may have given up while this job queued for the lock.
         cancel.check()?;
-        let model = model_guard.as_ref().ok_or_else(|| Error::Inference("Model not loaded".into()))?;
+        let model = model_guard
+            .as_ref()
+            .ok_or_else(|| Error::Inference("Model not loaded".into()))?;
         let tok_guard = self.tokenizer.blocking_lock();
-        let tokenizer = tok_guard.as_ref().ok_or_else(|| Error::Inference("Tokenizer not loaded".into()))?;
+        let tokenizer = tok_guard
+            .as_ref()
+            .ok_or_else(|| Error::Inference("Tokenizer not loaded".into()))?;
 
         let lang_id = |lang: NllbLanguage| {
             tokenizer
@@ -618,7 +673,18 @@ impl TranslateJob {
         // Framed length = content tokens + source-language token + </s>.
         let framed_len = |s: &str| encode_content(tokenizer, s).map(|v| v.len() + 2);
         let translate = |text: &str| -> Result<String> {
-            translate_chunk(tokenizer, model, &self.device, text, ids, ChunkOptions { reference: self.reference, config: &self.config, cancel })
+            translate_chunk(
+                tokenizer,
+                model,
+                &self.device,
+                text,
+                ids,
+                ChunkOptions {
+                    reference: self.reference,
+                    config: &self.config,
+                    cancel,
+                },
+            )
         };
 
         let units: Vec<Chunk> = if self.config.per_sentence {
@@ -629,7 +695,9 @@ impl TranslateJob {
                 if framed_len(&unit.text)? <= MAX_INPUT_TOKENS {
                     units.push(unit);
                 } else {
-                    let mut subs = chunk_text(&unit.text, &ChunkerConfig::default(), |s| framed_len(s).unwrap_or(0));
+                    let mut subs = chunk_text(&unit.text, &ChunkerConfig::default(), |s| {
+                        framed_len(s).unwrap_or(0)
+                    });
                     if let Some(last) = subs.last_mut() {
                         last.trailing_separator.push_str(&unit.trailing_separator);
                     }
@@ -641,7 +709,9 @@ impl TranslateJob {
             // Short-input fast path — single encode/generate/decode.
             return Ok((translate(&self.text)?, 1));
         } else {
-            chunk_text(&self.text, &ChunkerConfig::default(), |s| framed_len(s).unwrap_or(0))
+            chunk_text(&self.text, &ChunkerConfig::default(), |s| {
+                framed_len(s).unwrap_or(0)
+            })
         };
 
         // Translate each unit against the already-held model lock and rejoin
@@ -662,7 +732,11 @@ impl TranslateJob {
             // previously translated input. Disabled on the reference path so it
             // stays independent of the KV-cached path's results.
             let key = translation_cache_key(&unit.text, self.src, self.tgt, &self.config);
-            let cached = if use_cache { self.cache.get(&key) } else { None };
+            let cached = if use_cache {
+                self.cache.get(&key)
+            } else {
+                None
+            };
             let translated = match cached {
                 Some((t, _)) => t,
                 None => {
@@ -711,7 +785,11 @@ fn translate_chunk(
     ids: FrameIds,
     opts: ChunkOptions<'_>,
 ) -> Result<String> {
-    let ChunkOptions { reference, config, cancel } = opts;
+    let ChunkOptions {
+        reference,
+        config,
+        cancel,
+    } = opts;
     let content = encode_content(tokenizer, text)?;
     let max_new = output_budget(content.len());
 
@@ -725,7 +803,8 @@ fn translate_chunk(
     let input_tensor = Tensor::from_vec(input_ids, (1, seq_len), device)
         .map_err(|e| Error::Inference(e.to_string()))?;
 
-    let encoder_output = model.encode(&input_tensor)
+    let encoder_output = model
+        .encode(&input_tensor)
         .map_err(|e| Error::Inference(format!("Encoding failed: {}", e)))?;
     let (output_ids, stop) = if reference {
         model.generate_reference(&encoder_output, ids.tgt_lang, max_new, &|| cancel.is_set())
@@ -741,9 +820,13 @@ fn translate_chunk(
         return Err(Error::Degenerate(DegenerateKind::RepeatedTokens));
     }
 
-    let translated_text = tokenizer.decode(&output_ids, true)
+    let translated_text = tokenizer
+        .decode(&output_ids, true)
         .map_err(|e| Error::Tokenizer(e.to_string()))?
-        .replace("<unk>", "").replace("  ", " ").trim().to_string();
+        .replace("<unk>", "")
+        .replace("  ", " ")
+        .trim()
+        .to_string();
 
     if config.reject_empty && translated_text.is_empty() && !text.trim().is_empty() {
         return Err(Error::Degenerate(DegenerateKind::EmptyOutput));
@@ -783,8 +866,14 @@ mod tests {
         let eng = NllbLanguage::from_iso_code("eng").unwrap();
         let fr = NllbLanguage::from_iso_code("fr").unwrap();
         let d = TranslateConfig::default();
-        assert_eq!(translation_cache_key("hi", en, fr, &d), translation_cache_key("hi", eng, fr, &d));
-        assert_ne!(translation_cache_key("a-b", en, fr, &d), translation_cache_key("a", en, fr, &d));
+        assert_eq!(
+            translation_cache_key("hi", en, fr, &d),
+            translation_cache_key("hi", eng, fr, &d)
+        );
+        assert_ne!(
+            translation_cache_key("a-b", en, fr, &d),
+            translation_cache_key("a", en, fr, &d)
+        );
         assert_ne!(
             translation_cache_key("hi", en, fr, &d),
             translation_cache_key("hi", en, fr, &TranslateConfig::strict())
@@ -792,7 +881,10 @@ mod tests {
     }
 
     fn rt() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap()
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
     }
 
     #[test]
@@ -823,7 +915,9 @@ mod tests {
     #[test]
     fn completed_job_is_not_cancelled() {
         rt().block_on(async {
-            let r = run_blocking("test", |cancel| Ok(cancel.is_set())).await.unwrap();
+            let r = run_blocking("test", |cancel| Ok(cancel.is_set()))
+                .await
+                .unwrap();
             assert!(!r);
         });
     }
@@ -844,8 +938,14 @@ mod tests {
             e.to_string(),
             "Translation rejected: a complete source sentence was translated as an unfinished clause"
         );
-        assert_eq!(DegenerateKind::RepeatedTokens.to_string(), "output entered a repeated-token loop");
-        assert_eq!(DegenerateKind::EmptyOutput.to_string(), "empty translation for a non-empty source");
+        assert_eq!(
+            DegenerateKind::RepeatedTokens.to_string(),
+            "output entered a repeated-token loop"
+        );
+        assert_eq!(
+            DegenerateKind::EmptyOutput.to_string(),
+            "empty translation for a non-empty source"
+        );
     }
 
     #[test]
@@ -855,10 +955,22 @@ mod tests {
         assert!(!has_dangling_clause("It is done.", "C'est fait.", French));
         assert!(!has_dangling_clause("Note:", "Remarque :", French));
         // Greek question mark is `;` / U+037E — only for a question into Greek.
-        assert!(!has_dangling_clause("Is that okay?", "Είναι εντάξει;", Greek));
-        assert!(!has_dangling_clause("Is that okay?", "Είναι εντάξει\u{037E}", Greek));
+        assert!(!has_dangling_clause(
+            "Is that okay?",
+            "Είναι εντάξει;",
+            Greek
+        ));
+        assert!(!has_dangling_clause(
+            "Is that okay?",
+            "Είναι εντάξει\u{037E}",
+            Greek
+        ));
         assert!(has_dangling_clause("It is done.", "Έγινε;", Greek));
-        assert!(has_dangling_clause("Is that okay?", "Ist das okay;", German));
+        assert!(has_dangling_clause(
+            "Is that okay?",
+            "Ist das okay;",
+            German
+        ));
     }
 
     /// Cases carried over verbatim from the retired candle-nllb fork's
@@ -867,17 +979,45 @@ mod tests {
     #[test]
     fn dangling_clause_matches_candle_nllb_fork_cases() {
         use NllbLanguage::{Chinese, French, Greek};
-        assert!(has_dangling_clause("Deliver the full sentence.", "给我发送钱,", Chinese));
-        assert!(has_dangling_clause("Complete source.", "Première partie :", French));
-        assert!(!has_dangling_clause("Complete source.", "完整翻译", Chinese));
+        assert!(has_dangling_clause(
+            "Deliver the full sentence.",
+            "给我发送钱,",
+            Chinese
+        ));
+        assert!(has_dangling_clause(
+            "Complete source.",
+            "Première partie :",
+            French
+        ));
+        assert!(!has_dangling_clause(
+            "Complete source.",
+            "完整翻译",
+            Chinese
+        ));
         assert!(!has_dangling_clause("Label:", "标签：", Chinese));
 
-        assert!(!has_dangling_clause("How are you today?", "Πώς είσαι σήμερα;", Greek));
-        assert!(!has_dangling_clause("How are you today?", "Πώς είσαι σήμερα\u{037E}", Greek));
+        assert!(!has_dangling_clause(
+            "How are you today?",
+            "Πώς είσαι σήμερα;",
+            Greek
+        ));
+        assert!(!has_dangling_clause(
+            "How are you today?",
+            "Πώς είσαι σήμερα\u{037E}",
+            Greek
+        ));
         // Only a question may end with the Greek question mark.
-        assert!(has_dangling_clause("A full statement.", "Μια δήλωση;", Greek));
+        assert!(has_dangling_clause(
+            "A full statement.",
+            "Μια δήλωση;",
+            Greek
+        ));
         // Other targets keep the strict rule.
-        assert!(has_dangling_clause("How are you today?", "Comment ;", French));
+        assert!(has_dangling_clause(
+            "How are you today?",
+            "Comment ;",
+            French
+        ));
     }
 
     /// The three en→el calibration rows strict mode used to reject (SlopShift
@@ -899,11 +1039,17 @@ mod tests {
             ),
         ];
         for (source, whole, last_unit_out) in rows {
-            assert!(!has_dangling_clause(source, whole, NllbLanguage::Greek), "{source}");
+            assert!(
+                !has_dangling_clause(source, whole, NllbLanguage::Greek),
+                "{source}"
+            );
             let units = sentence_units(source);
             let last_unit = &units.last().unwrap().text;
             assert!(last_unit.ends_with('?'), "{last_unit}");
-            assert!(!has_dangling_clause(last_unit, last_unit_out, NllbLanguage::Greek), "{last_unit}");
+            assert!(
+                !has_dangling_clause(last_unit, last_unit_out, NllbLanguage::Greek),
+                "{last_unit}"
+            );
         }
     }
 
@@ -912,16 +1058,28 @@ mod tests {
     #[test]
     fn strict_config_enables_every_check() {
         let s = TranslateConfig::strict();
-        assert!(s.per_sentence && s.reject_empty && s.reject_dangling_clause && s.reject_repetition);
+        assert!(
+            s.per_sentence && s.reject_empty && s.reject_dangling_clause && s.reject_repetition
+        );
         let d = TranslateConfig::default();
-        assert!(!d.per_sentence && !d.reject_empty && !d.reject_dangling_clause && !d.reject_repetition);
+        assert!(
+            !d.per_sentence && !d.reject_empty && !d.reject_dangling_clause && !d.reject_repetition
+        );
     }
 
     #[test]
     fn nllb_codes_resolve_and_uncovered_languages_are_rejected() {
-        assert_eq!(resolve_language("fra_Latn", "fra_Latn", "en").unwrap().iso_code(), "fr");
+        assert_eq!(
+            resolve_language("fra_Latn", "fra_Latn", "en")
+                .unwrap()
+                .iso_code(),
+            "fr"
+        );
         // Bavarian has no NLLB-200 token, so it is not a known language.
-        assert!(matches!(resolve_language("bar", "bar", "en"), Err(Error::InvalidLanguagePair(_, _))));
+        assert!(matches!(
+            resolve_language("bar", "bar", "en"),
+            Err(Error::InvalidLanguagePair(_, _))
+        ));
         assert!(resolve_language("en", "en", "fr").is_ok());
     }
 

@@ -75,7 +75,9 @@ impl std::fmt::Display for DegenerateKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             DegenerateKind::EmptyOutput => "empty translation for a non-empty source",
-            DegenerateKind::DanglingClause => "a complete source sentence was translated as an unfinished clause",
+            DegenerateKind::DanglingClause => {
+                "a complete source sentence was translated as an unfinished clause"
+            }
             DegenerateKind::RepeatedTokens => "output entered a repeated-token loop",
         })
     }

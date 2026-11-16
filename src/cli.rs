@@ -1,13 +1,15 @@
 //! lingo CLI — translate text and score similarity from the command line.
 
-use lingo::{LaBSEEncoder, NllbLanguage, NllbTranslator, SonarEncoder};
 use clap::{Parser, Subcommand};
+use lingo::{LaBSEEncoder, NllbLanguage, NllbTranslator, SonarEncoder};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "lingo")]
-#[command(about = "Multilingual NLP: translation (NLLB-200), similarity scoring (LaBSE/SONAR) on Metal/CUDA GPU")]
+#[command(
+    about = "Multilingual NLP: translation (NLLB-200), similarity scoring (LaBSE/SONAR) on Metal/CUDA GPU"
+)]
 #[command(version)]
 struct Args {
     #[command(subcommand)]
@@ -103,7 +105,10 @@ enum Commands {
 /// Returns true if download should proceed, false if cancelled.
 fn prompt_download(model_name: &str, size_hint: &str) -> bool {
     if !io::stdin().is_terminal() {
-        eprintln!("Run interactively to auto-download, or use: lingo download {}", model_name.to_lowercase());
+        eprintln!(
+            "Run interactively to auto-download, or use: lingo download {}",
+            model_name.to_lowercase()
+        );
         return false;
     }
 
@@ -183,7 +188,10 @@ fn download_one(name: &str, dir: &Path) -> anyhow::Result<()> {
             }
         }
         "labse" => {
-            if ["model.safetensors", "config.json", "tokenizer.json"].iter().all(|f| dir.join(f).exists()) {
+            if ["model.safetensors", "config.json", "tokenizer.json"]
+                .iter()
+                .all(|f| dir.join(f).exists())
+            {
                 eprintln!("LaBSE already downloaded at {}", dir.display());
             } else {
                 eprintln!("Downloading LaBSE (~1.8 GB)...");
@@ -193,7 +201,10 @@ fn download_one(name: &str, dir: &Path) -> anyhow::Result<()> {
         }
         "sonar" => {
             // download_sonar is idempotent and also upgrades a legacy tokenizer.
-            eprintln!("Preparing SONAR at {} (first run downloads ~3 GB and needs Python + torch)...", dir.display());
+            eprintln!(
+                "Preparing SONAR at {} (first run downloads ~3 GB and needs Python + torch)...",
+                dir.display()
+            );
             lingo::download::download_sonar(dir)?;
             eprintln!("SONAR ready.");
         }
@@ -216,27 +227,47 @@ async fn main() -> anyhow::Result<()> {
 
     // License gate — required before any model is *used*. Listing languages
     // and downloading weights are exempt (install -> download -> accept -> use).
-    if !matches!(args.command, Commands::Languages | Commands::Download { .. }) {
+    if !matches!(
+        args.command,
+        Commands::Languages | Commands::Download { .. }
+    ) {
         require_license()?;
     }
 
     match args.command {
-        Commands::Translate { text, from, to, model_dir, json } => {
+        Commands::Translate {
+            text,
+            from,
+            to,
+            model_dir,
+            json,
+        } => {
             let translator = NllbTranslator::new(model_dir.map(PathBuf::from))?;
-            ensure_downloaded("NLLB-200", "~2.5 GB", translator.model_dir(), translator.is_model_downloaded(),
-                || translator.download_model())?;
+            ensure_downloaded(
+                "NLLB-200",
+                "~2.5 GB",
+                translator.model_dir(),
+                translator.is_model_downloaded(),
+                || translator.download_model(),
+            )?;
 
             let text = match text {
                 Some(t) => t,
                 None => {
                     let mut lines = Vec::new();
-                    for line in io::stdin().lock().lines() { lines.push(line?); }
+                    for line in io::stdin().lock().lines() {
+                        lines.push(line?);
+                    }
                     lines.join("\n")
                 }
             };
 
             translator.load().await?;
-            let targets: Vec<&str> = to.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let targets: Vec<&str> = to
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             let mut results = Vec::new();
             let mut failures = 0usize;
 
@@ -251,7 +282,10 @@ async fn main() -> anyhow::Result<()> {
                                 "chunk_count": r.chunk_count,
                             }));
                         } else if r.chunk_count > 1 {
-                            println!("[{}] {} ({}ms, {} chunks)", target, r.text, r.duration_ms, r.chunk_count);
+                            println!(
+                                "[{}] {} ({}ms, {} chunks)",
+                                target, r.text, r.duration_ms, r.chunk_count
+                            );
                         } else {
                             println!("[{}] {} ({}ms)", target, r.text, r.duration_ms);
                         }
@@ -262,38 +296,76 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            if json { println!("{}", serde_json::to_string_pretty(&results)?); }
-            if failures > 0 { std::process::exit(1); }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            }
+            if failures > 0 {
+                std::process::exit(1);
+            }
         }
 
-        Commands::Score { text1, text2, model_dir } => {
+        Commands::Score {
+            text1,
+            text2,
+            model_dir,
+        } => {
             let encoder = LaBSEEncoder::new(model_dir.map(PathBuf::from))?;
-            ensure_downloaded("LaBSE", "~1.8 GB", encoder.model_dir(), encoder.is_model_downloaded(),
-                || encoder.download_model())?;
+            ensure_downloaded(
+                "LaBSE",
+                "~1.8 GB",
+                encoder.model_dir(),
+                encoder.is_model_downloaded(),
+                || encoder.download_model(),
+            )?;
             let score = encoder.score(&text1, &text2).await?;
             println!("{:.4}", score);
         }
 
         Commands::Embed { text, model_dir } => {
             let encoder = LaBSEEncoder::new(model_dir.map(PathBuf::from))?;
-            ensure_downloaded("LaBSE", "~1.8 GB", encoder.model_dir(), encoder.is_model_downloaded(),
-                || encoder.download_model())?;
+            ensure_downloaded(
+                "LaBSE",
+                "~1.8 GB",
+                encoder.model_dir(),
+                encoder.is_model_downloaded(),
+                || encoder.download_model(),
+            )?;
             let embedding = encoder.embed(&text).await?;
             println!("{}", serde_json::to_string(&embedding)?);
         }
 
-        Commands::SonarScore { text1, text2, lang1, lang2, model_dir } => {
+        Commands::SonarScore {
+            text1,
+            text2,
+            lang1,
+            lang2,
+            model_dir,
+        } => {
             let encoder = SonarEncoder::new(model_dir.map(PathBuf::from))?;
-            ensure_downloaded("SONAR", "~3 GB, requires Python + torch", encoder.model_dir(),
-                encoder.is_model_downloaded(), || encoder.download_model())?;
+            ensure_downloaded(
+                "SONAR",
+                "~3 GB, requires Python + torch",
+                encoder.model_dir(),
+                encoder.is_model_downloaded(),
+                || encoder.download_model(),
+            )?;
             let score = encoder.score_langs(&text1, &lang1, &text2, &lang2).await?;
             println!("{:.4}", score);
         }
 
-        Commands::SonarEmbed { text, lang, model_dir } => {
+        Commands::SonarEmbed {
+            text,
+            lang,
+            model_dir,
+        } => {
             let encoder = SonarEncoder::new(model_dir.map(PathBuf::from))?;
-            ensure_downloaded("SONAR", "~3 GB, requires Python + torch", encoder.model_dir(),
-                encoder.is_model_downloaded(), || encoder.download_model())?;
+            ensure_downloaded(
+                "SONAR",
+                "~3 GB, requires Python + torch",
+                encoder.model_dir(),
+                encoder.is_model_downloaded(),
+                || encoder.download_model(),
+            )?;
             let embedding = encoder.embed_lang(&text, &lang).await?;
             println!("{}", serde_json::to_string(&embedding)?);
         }
@@ -315,7 +387,10 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("All models ready.");
                 }
                 other => {
-                    eprintln!("Unknown model: '{}'. Use: nllb, labse, sonar, or all", other);
+                    eprintln!(
+                        "Unknown model: '{}'. Use: nllb, labse, sonar, or all",
+                        other
+                    );
                     std::process::exit(1);
                 }
             }
@@ -326,7 +401,12 @@ async fn main() -> anyhow::Result<()> {
             println!("{:<9} {:<34} NLLB Code", "Code", "Language");
             println!("{}", "-".repeat(53));
             for lang in &languages {
-                println!("{:<9} {:<34} {}", lang.iso_code(), lang.name(), lang.nllb_code());
+                println!(
+                    "{:<9} {:<34} {}",
+                    lang.iso_code(),
+                    lang.name(),
+                    lang.nllb_code()
+                );
             }
             println!("\n{} languages", languages.len());
         }

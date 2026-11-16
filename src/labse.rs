@@ -100,16 +100,24 @@ impl BertEmbeddings {
         let vb_emb = vb.pp("embeddings");
         Ok(Self {
             word_embeddings: candle_nn::embedding(
-                cfg.vocab_size, cfg.hidden_size, vb_emb.pp("word_embeddings"),
+                cfg.vocab_size,
+                cfg.hidden_size,
+                vb_emb.pp("word_embeddings"),
             )?,
             position_embeddings: candle_nn::embedding(
-                cfg.max_position_embeddings, cfg.hidden_size, vb_emb.pp("position_embeddings"),
+                cfg.max_position_embeddings,
+                cfg.hidden_size,
+                vb_emb.pp("position_embeddings"),
             )?,
             token_type_embeddings: candle_nn::embedding(
-                cfg.type_vocab_size, cfg.hidden_size, vb_emb.pp("token_type_embeddings"),
+                cfg.type_vocab_size,
+                cfg.hidden_size,
+                vb_emb.pp("token_type_embeddings"),
             )?,
             layer_norm: ManualLayerNorm::load(
-                cfg.hidden_size, cfg.layer_norm_eps, vb_emb.pp("LayerNorm"),
+                cfg.hidden_size,
+                cfg.layer_norm_eps,
+                vb_emb.pp("LayerNorm"),
             )?,
         })
     }
@@ -121,8 +129,7 @@ impl BertEmbeddings {
         let word_emb = self.word_embeddings.forward(input_ids)?;
         let type_emb = self.token_type_embeddings.forward(token_type_ids)?;
 
-        let position_ids = Tensor::arange(0u32, seq_len as u32, device)?
-            .unsqueeze(0)?;
+        let position_ids = Tensor::arange(0u32, seq_len as u32, device)?.unsqueeze(0)?;
         let pos_emb = self.position_embeddings.forward(&position_ids)?;
 
         let embeddings = (word_emb + type_emb + pos_emb)?;
@@ -162,9 +169,15 @@ impl BertSelfAttention {
         let v = self.value.forward(hidden)?;
 
         // Reshape to [batch, heads, seq, head_dim]
-        let q = q.reshape((b, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let k = k.reshape((b, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let v = v.reshape((b, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
+        let q = q
+            .reshape((b, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let k = k
+            .reshape((b, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let v = v
+            .reshape((b, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
 
         let scale = (self.head_dim as f64).sqrt();
         let q = q.contiguous()?;
@@ -187,10 +200,11 @@ impl BertSelfAttention {
         };
 
         let attn_output = attn_weights.matmul(&v)?;
-        attn_output
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((b, seq_len, self.num_heads * self.head_dim))
+        attn_output.transpose(1, 2)?.contiguous()?.reshape((
+            b,
+            seq_len,
+            self.num_heads * self.head_dim,
+        ))
     }
 }
 
@@ -222,12 +236,16 @@ impl BertEncoderLayer {
             self_attn: BertSelfAttention::load(vb.pp("attention").pp("self"), cfg)?,
             attn_output: linear(h, h, vb.pp("attention").pp("output").pp("dense"))?,
             attn_layer_norm: ManualLayerNorm::load(
-                h, cfg.layer_norm_eps, vb.pp("attention").pp("output").pp("LayerNorm"),
+                h,
+                cfg.layer_norm_eps,
+                vb.pp("attention").pp("output").pp("LayerNorm"),
             )?,
             intermediate: linear(h, i, vb.pp("intermediate").pp("dense"))?,
             output: linear(i, h, vb.pp("output").pp("dense"))?,
             output_layer_norm: ManualLayerNorm::load(
-                h, cfg.layer_norm_eps, vb.pp("output").pp("LayerNorm"),
+                h,
+                cfg.layer_norm_eps,
+                vb.pp("output").pp("LayerNorm"),
             )?,
         })
     }
@@ -262,7 +280,8 @@ impl CustomBertModel {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {
             layers.push(BertEncoderLayer::load(
-                vb.pp(format!("encoder.layer.{}", i)), cfg,
+                vb.pp(format!("encoder.layer.{}", i)),
+                cfg,
             )?);
         }
         Ok(Self { embeddings, layers })
@@ -277,13 +296,15 @@ impl CustomBertModel {
         let mut hidden = self.embeddings.forward(input_ids, token_type_ids)?;
 
         // Convert attention_mask [batch, seq] -> [batch, 1, 1, seq] with 0/-inf
-        let mask = attention_mask.map(|m| -> CandleResult<Tensor> {
-            let cond = m.to_dtype(DType::U32)?.unsqueeze(1)?.unsqueeze(1)?;
-            let on_true = Tensor::zeros(cond.shape(), DType::F32, m.device())?;
-            let on_false = Tensor::new(f32::NEG_INFINITY, m.device())?
-                .broadcast_as(cond.shape())?;
-            cond.where_cond(&on_true, &on_false)
-        }).transpose()?;
+        let mask = attention_mask
+            .map(|m| -> CandleResult<Tensor> {
+                let cond = m.to_dtype(DType::U32)?.unsqueeze(1)?.unsqueeze(1)?;
+                let on_true = Tensor::zeros(cond.shape(), DType::F32, m.device())?;
+                let on_false =
+                    Tensor::new(f32::NEG_INFINITY, m.device())?.broadcast_as(cond.shape())?;
+                cond.where_cond(&on_true, &on_false)
+            })
+            .transpose()?;
 
         for layer in &self.layers {
             hidden = layer.forward(&hidden, mask.as_ref())?;
@@ -331,7 +352,12 @@ impl LaBSEModel {
             ));
         };
 
-        Ok(Self { bert, max_len: config.max_position_embeddings, dense_weight, dense_bias })
+        Ok(Self {
+            bert,
+            max_len: config.max_position_embeddings,
+            dense_weight,
+            dense_bias,
+        })
     }
 
     /// Encode a batch of token IDs into normalized embeddings.
@@ -342,7 +368,9 @@ impl LaBSEModel {
         attention_mask: Option<&Tensor>,
     ) -> CandleResult<Tensor> {
         // BERT forward pass -> [batch, seq_len, 768]
-        let sequence_output = self.bert.forward(input_ids, token_type_ids, attention_mask)?;
+        let sequence_output = self
+            .bert
+            .forward(input_ids, token_type_ids, attention_mask)?;
 
         // CLS token pooling: extract position 0 -> [batch, 768]
         let cls_output = sequence_output.i((.., 0, ..))?;
@@ -355,10 +383,7 @@ impl LaBSEModel {
         let tanh_output = dense_output.tanh()?;
 
         // L2 normalization: v / ||v||_2
-        let norm = tanh_output
-            .sqr()?
-            .sum_keepdim(D::Minus1)?
-            .sqrt()?;
+        let norm = tanh_output.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
         tanh_output.broadcast_div(&norm)
     }
 }
@@ -417,7 +442,10 @@ impl LaBSEEncoder {
             model_dir,
             model: Arc::new(Mutex::new(None)),
             tokenizer: Arc::new(Mutex::new(None)),
-            cache: Arc::new(BoundedCache::new(EMBED_CACHE_MAX, EMBED_CACHE_MAX_KEY_BYTES)),
+            cache: Arc::new(BoundedCache::new(
+                EMBED_CACHE_MAX,
+                EMBED_CACHE_MAX_KEY_BYTES,
+            )),
             loaded: AtomicBool::new(false),
             device,
         }
@@ -495,7 +523,9 @@ impl LaBSEEncoder {
         // Load weights
         let weight_path = self.model_dir.join("model.safetensors");
         if !weight_path.exists() {
-            return Err(Error::ModelNotFound("model.safetensors not found".to_string()));
+            return Err(Error::ModelNotFound(
+                "model.safetensors not found".to_string(),
+            ));
         }
         let mut weight_files = vec![weight_path];
         let dense_path = self.model_dir.join("2_Dense").join("model.safetensors");
@@ -514,7 +544,10 @@ impl LaBSEEncoder {
 
         info!(
             "LaBSE loaded on {:?} ({} layers, {} dim, {}K vocab)",
-            self.device, config.num_hidden_layers, config.hidden_size, config.vocab_size / 1000
+            self.device,
+            config.num_hidden_layers,
+            config.hidden_size,
+            config.vocab_size / 1000
         );
 
         *model_guard = Some(m);
@@ -557,9 +590,14 @@ impl LaBSEEncoder {
                 .encode(text_owned.as_str(), true)
                 .map_err(|e| Error::Tokenizer(e.to_string()))?;
             let (lead, trail) = crate::windows::special_frame(encoding.get_special_tokens_mask());
-            let windows = crate::windows::token_windows(encoding.get_ids(), lead, trail, model.max_len);
+            let windows =
+                crate::windows::token_windows(encoding.get_ids(), lead, trail, model.max_len);
             if windows.len() > 1 {
-                debug!("LaBSE: encoding {} windows ({} tokens)", windows.len(), encoding.get_ids().len());
+                debug!(
+                    "LaBSE: encoding {} windows ({} tokens)",
+                    windows.len(),
+                    encoding.get_ids().len()
+                );
             }
 
             let mut pooled = Vec::with_capacity(windows.len());
@@ -573,7 +611,8 @@ impl LaBSEEncoder {
                     let mask = Tensor::ones((1, len), DType::F32, &device)?;
                     model.encode(&ids, &types, Some(&mask))?.i(0)?.to_vec1()
                 };
-                let embedding = run().map_err(|e| Error::Inference(format!("Encoding failed: {}", e)))?;
+                let embedding =
+                    run().map_err(|e| Error::Inference(format!("Encoding failed: {}", e)))?;
                 pooled.push((embedding, window.weight));
             }
             Ok(crate::windows::combine(pooled))

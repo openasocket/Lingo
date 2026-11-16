@@ -136,9 +136,15 @@ impl MultiHeadAttention {
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
 
-        let q = q.reshape((b, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let k = k.reshape((b, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let v = v.reshape((b, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
+        let q = q
+            .reshape((b, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let k = k
+            .reshape((b, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let v = v
+            .reshape((b, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
 
         let scale = (self.head_dim as f64).sqrt();
         let q = q.contiguous()?;
@@ -185,13 +191,13 @@ impl SonarEncoderLayer {
         Ok(Self {
             self_attn: MultiHeadAttention::load(vb.pp("self_attn"), cfg)?,
             self_attn_layer_norm: ManualLayerNorm::load(
-                cfg.d_model, 1e-5, vb.pp("self_attn_layer_norm"),
+                cfg.d_model,
+                1e-5,
+                vb.pp("self_attn_layer_norm"),
             )?,
             ffn_inner: linear(cfg.d_model, cfg.ffn_dim, vb.pp("ffn").pp("inner_proj"))?,
             ffn_output: linear(cfg.ffn_dim, cfg.d_model, vb.pp("ffn").pp("output_proj"))?,
-            ffn_layer_norm: ManualLayerNorm::load(
-                cfg.d_model, 1e-5, vb.pp("ffn_layer_norm"),
-            )?,
+            ffn_layer_norm: ManualLayerNorm::load(cfg.d_model, 1e-5, vb.pp("ffn_layer_norm"))?,
         })
     }
 
@@ -229,24 +235,35 @@ struct SonarModel {
 impl SonarModel {
     fn load(vb: VarBuilder, cfg: &SonarConfig, device: &Device) -> CandleResult<Self> {
         let embed = candle_nn::embedding(
-            cfg.vocab_size, cfg.d_model, vb.pp("encoder_frontend").pp("embed"),
+            cfg.vocab_size,
+            cfg.d_model,
+            vb.pp("encoder_frontend").pp("embed"),
         )?;
         let pos_embeddings = crate::model::sinusoidal_embeddings(
-            SONAR_MAX_SEQ_LEN, cfg.d_model, 2, embed.embeddings().dtype(), device,
+            SONAR_MAX_SEQ_LEN,
+            cfg.d_model,
+            2,
+            embed.embeddings().dtype(),
+            device,
         )?;
 
         let mut layers = Vec::with_capacity(cfg.num_layers);
         for i in 0..cfg.num_layers {
             layers.push(SonarEncoderLayer::load(
-                vb.pp(format!("encoder.layers.{}", i)), cfg,
+                vb.pp(format!("encoder.layers.{}", i)),
+                cfg,
             )?);
         }
 
-        let final_layer_norm = ManualLayerNorm::load(
-            cfg.d_model, 1e-5, vb.pp("layer_norm"),
-        )?;
+        let final_layer_norm = ManualLayerNorm::load(cfg.d_model, 1e-5, vb.pp("layer_norm"))?;
 
-        Ok(Self { embed, pos_embeddings, layers, final_layer_norm, d_model: cfg.d_model })
+        Ok(Self {
+            embed,
+            pos_embeddings,
+            layers,
+            final_layer_norm,
+            d_model: cfg.d_model,
+        })
     }
 
     /// Encode input_ids -> mean-pooled, L2-normalized 1024-dim embedding.
@@ -291,11 +308,17 @@ fn hf_to_fairseq2(id: u32) -> u32 {
 
 /// Build the framed SONAR input `[lang] tokens... [</s>]` for the whole text
 /// (no truncation; long inputs are windowed by the caller).
-fn sonar_input_ids(tokenizer: &tokenizers::Tokenizer, text: &str, lang_code: &str) -> Result<Vec<u32>> {
+fn sonar_input_ids(
+    tokenizer: &tokenizers::Tokenizer,
+    text: &str,
+    lang_code: &str,
+) -> Result<Vec<u32>> {
     let lang_id = tokenizer
         .token_to_id(lang_code)
         .ok_or_else(|| Error::UnsupportedLanguage(lang_code.to_string()))?;
-    let encoding = tokenizer.encode(text, false).map_err(|e| Error::Tokenizer(e.to_string()))?;
+    let encoding = tokenizer
+        .encode(text, false)
+        .map_err(|e| Error::Tokenizer(e.to_string()))?;
     let content = encoding.get_ids();
     let mut ids = Vec::with_capacity(content.len() + 2);
     ids.push(lang_id);
@@ -360,7 +383,10 @@ impl SonarEncoder {
             model_dir,
             model: Arc::new(Mutex::new(None)),
             tokenizer: Arc::new(Mutex::new(None)),
-            cache: Arc::new(BoundedCache::new(EMBED_CACHE_MAX, EMBED_CACHE_MAX_KEY_BYTES)),
+            cache: Arc::new(BoundedCache::new(
+                EMBED_CACHE_MAX,
+                EMBED_CACHE_MAX_KEY_BYTES,
+            )),
             loaded: AtomicBool::new(false),
             device,
         }
@@ -443,7 +469,10 @@ impl SonarEncoder {
         let m = SonarModel::load(vb, &cfg, &self.device)
             .map_err(|e| Error::Inference(format!("Failed to build SONAR model: {}", e)))?;
 
-        info!("SONAR loaded on {:?} ({} layers, {} dim)", self.device, cfg.num_layers, cfg.d_model);
+        info!(
+            "SONAR loaded on {:?} ({} layers, {} dim)",
+            self.device, cfg.num_layers, cfg.d_model
+        );
 
         *model_guard = Some(m);
         *self.tokenizer.lock().await = Some(tokenizer);
@@ -485,16 +514,22 @@ impl SonarEncoder {
             // Lock order (model, then tokenizer) matches `load`.
             let model_guard = model.blocking_lock();
             cancel.check()?;
-            let model = model_guard.as_ref()
+            let model = model_guard
+                .as_ref()
                 .ok_or_else(|| Error::Inference("Model not loaded".into()))?;
             let tok_guard = tokenizer.blocking_lock();
-            let tokenizer = tok_guard.as_ref()
+            let tokenizer = tok_guard
+                .as_ref()
                 .ok_or_else(|| Error::Inference("Tokenizer not loaded".into()))?;
 
             let ids = sonar_input_ids(tokenizer, &text_owned, lang_code)?;
             let windows = crate::windows::token_windows(&ids, 1, 1, SONAR_MAX_SEQ_LEN);
             if windows.len() > 1 {
-                debug!("SONAR: encoding {} windows ({} tokens)", windows.len(), ids.len());
+                debug!(
+                    "SONAR: encoding {} windows ({} tokens)",
+                    windows.len(),
+                    ids.len()
+                );
             }
             let mut pooled = Vec::with_capacity(windows.len());
             for window in windows {
@@ -504,7 +539,8 @@ impl SonarEncoder {
                     .map_err(|e| Error::Inference(e.to_string()))?;
                 let attention_mask_t = Tensor::ones((1, len), DType::F32, &device)
                     .map_err(|e| Error::Inference(e.to_string()))?;
-                let embedding: Vec<f32> = model.encode(&input_ids_t, &attention_mask_t)
+                let embedding: Vec<f32> = model
+                    .encode(&input_ids_t, &attention_mask_t)
                     .and_then(|t| t.i(0))
                     .and_then(|t| t.to_vec1())
                     .map_err(|e| Error::Inference(format!("SONAR encoding failed: {}", e)))?;
@@ -521,17 +557,28 @@ impl SonarEncoder {
     /// Score similarity between two English texts. Returns cosine similarity
     /// in [-1, 1]. Equivalent to `score_langs(text1, "en", text2, "en")`.
     pub async fn score(&self, text1: &str, text2: &str) -> Result<f32> {
-        self.score_langs(text1, DEFAULT_LANG, text2, DEFAULT_LANG).await
+        self.score_langs(text1, DEFAULT_LANG, text2, DEFAULT_LANG)
+            .await
     }
 
     /// Score similarity between `text1` (in `lang1`) and `text2` (in `lang2`).
     /// Returns cosine similarity in [-1, 1].
-    pub async fn score_langs(&self, text1: &str, lang1: &str, text2: &str, lang2: &str) -> Result<f32> {
+    pub async fn score_langs(
+        &self,
+        text1: &str,
+        lang1: &str,
+        text2: &str,
+        lang2: &str,
+    ) -> Result<f32> {
         let start = Instant::now();
         let emb1 = self.embed_lang(text1, lang1).await?;
         let emb2 = self.embed_lang(text2, lang2).await?;
         let score: f32 = emb1.iter().zip(emb2.iter()).map(|(a, b)| a * b).sum();
-        debug!("SONAR score: {:.4} ({}ms)", score, start.elapsed().as_millis());
+        debug!(
+            "SONAR score: {:.4} ({}ms)",
+            score,
+            start.elapsed().as_millis()
+        );
         Ok(score)
     }
 

@@ -167,6 +167,10 @@ wedged in a GPU call).
 | POST | `/score` | `{"text1", "text2"}` -> similarity score |
 | POST | `/embed` | `{"text"}` -> 768-dim embedding |
 | POST | `/embed_batch` | `{"texts": [...]}` -> batch embeddings |
+| POST | `/labse/score`, `/labse/embed`, `/labse/embed_batch` | Aliases of `/score`, `/embed`, `/embed_batch` (LaBSE, 768-dim), for clients that name the model |
+| POST | `/sonar/embed` | `{"text", "lang"?}` -> `{"embedding", "dim", "dimensions", "duration_ms"}` (SONAR, 1024-dim; `lang` defaults to `"en"`) |
+| POST | `/sonar/embed_batch` | `{"texts": [...], "lang"?}` -> `{"embeddings", "count", "dim", "dimensions", "duration_ms"}` (one `lang` for the whole batch) |
+| POST | `/sonar/score` | `{"text1", "text2", "lang1"?, "lang2"?}` -> `{"score", "duration_ms"}` (SONAR cosine similarity) |
 | POST | `/analyze` | `{"text", "source", "target"}` -> translation + LaBSE & SONAR scores + chunk_count metadata |
 | POST | `/analyze_batch` | `{"texts": [...], "source", "target"}` -> batch translate + score + per-item chunk_counts |
 | GET | `/health` | `*_loaded` (in memory) and `*_downloaded` (on disk) per model |
@@ -188,6 +192,15 @@ curl -X POST http://localhost:3000/translate_batch \
 curl -X POST http://localhost:3000/embed_batch \
   -H "Content-Type: application/json" \
   -d '{"texts": ["Hello world", "Bonjour le monde", "Hola mundo"]}'
+
+curl -X POST http://localhost:3000/sonar/score \
+  -H "Content-Type: application/json" \
+  -d '{"text1": "Hello world", "text2": "Bonjour le monde", "lang1": "en", "lang2": "fr"}'
+# {"score":0.863,"duration_ms":...}
+
+curl -X POST http://localhost:3000/sonar/embed_batch \
+  -H "Content-Type: application/json" \
+  -d '{"texts": ["Bonjour le monde", "Bonne nuit"], "lang": "fr"}'
 
 curl -X POST http://localhost:3000/analyze \
   -H "Content-Type: application/json" \

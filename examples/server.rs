@@ -10,6 +10,10 @@
 //!   POST /score           — score similarity between two texts (LaBSE)
 //!   POST /embed           — get 768-dim embedding for text (LaBSE)
 //!   POST /embed_batch     — get embeddings for multiple texts (LaBSE)
+//!   POST /labse/score, /labse/embed, /labse/embed_batch — aliases of the three above
+//!   POST /sonar/embed     — 1024-dim SONAR embedding of `text` in `lang` (default "en")
+//!   POST /sonar/embed_batch — SONAR embeddings for `texts`, all in `lang`
+//!   POST /sonar/score     — SONAR similarity of `text1` (`lang1`) and `text2` (`lang2`)
 //!   POST /analyze         — translate + LaBSE & SONAR scores in one call
 //!   POST /analyze_batch   — batch translate + score
 //!   GET  /health          — server health check
@@ -51,27 +55,101 @@ use tracing::{error, info, warn};
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct TranslateRequest { text: String, source: String, target: String }
+struct TranslateRequest {
+    text: String,
+    source: String,
+    target: String,
+}
 #[derive(Serialize)]
-struct TranslateResponse { translation: String, source_lang: String, target_lang: String, duration_ms: u64, chunk_count: usize }
+struct TranslateResponse {
+    translation: String,
+    source_lang: String,
+    target_lang: String,
+    duration_ms: u64,
+    chunk_count: usize,
+}
 
 #[derive(Deserialize)]
-struct ScoreRequest { text1: String, text2: String }
+struct ScoreRequest {
+    text1: String,
+    text2: String,
+}
 #[derive(Serialize)]
-struct ScoreResponse { score: f32, duration_ms: u64 }
+struct ScoreResponse {
+    score: f32,
+    duration_ms: u64,
+}
 
 #[derive(Deserialize)]
-struct EmbedRequest { text: String }
+struct EmbedRequest {
+    text: String,
+}
 #[derive(Serialize)]
-struct EmbedResponse { embedding: Vec<f32>, dimensions: usize }
+struct EmbedResponse {
+    embedding: Vec<f32>,
+    dimensions: usize,
+}
 
 #[derive(Deserialize)]
-struct EmbedBatchRequest { texts: Vec<String> }
+struct EmbedBatchRequest {
+    texts: Vec<String>,
+}
 #[derive(Serialize)]
-struct EmbedBatchResponse { embeddings: Vec<Vec<f32>>, dimensions: usize, count: usize }
+struct EmbedBatchResponse {
+    embeddings: Vec<Vec<f32>>,
+    dimensions: usize,
+    count: usize,
+}
+
+fn default_lang() -> String {
+    "en".into()
+}
 
 #[derive(Deserialize)]
-struct TranslateBatchRequest { texts: Vec<String>, source: String, target: String }
+struct SonarEmbedRequest {
+    text: String,
+    #[serde(default = "default_lang")]
+    lang: String,
+}
+#[derive(Serialize)]
+struct SonarEmbedResponse {
+    embedding: Vec<f32>,
+    dim: usize,
+    dimensions: usize,
+    duration_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct SonarEmbedBatchRequest {
+    texts: Vec<String>,
+    #[serde(default = "default_lang")]
+    lang: String,
+}
+#[derive(Serialize)]
+struct SonarEmbedBatchResponse {
+    embeddings: Vec<Vec<f32>>,
+    count: usize,
+    dim: usize,
+    dimensions: usize,
+    duration_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct SonarScoreRequest {
+    text1: String,
+    text2: String,
+    #[serde(default = "default_lang")]
+    lang1: String,
+    #[serde(default = "default_lang")]
+    lang2: String,
+}
+
+#[derive(Deserialize)]
+struct TranslateBatchRequest {
+    texts: Vec<String>,
+    source: String,
+    target: String,
+}
 #[derive(Serialize)]
 struct TranslateBatchResponse {
     translations: Vec<String>,
@@ -83,7 +161,11 @@ struct TranslateBatchResponse {
 }
 
 #[derive(Deserialize)]
-struct AnalyzeRequest { text: String, source: String, target: String }
+struct AnalyzeRequest {
+    text: String,
+    source: String,
+    target: String,
+}
 #[derive(Serialize)]
 struct AnalyzeResponse {
     source_text: String,
@@ -97,12 +179,22 @@ struct AnalyzeResponse {
 }
 
 #[derive(Deserialize)]
-struct AnalyzeBatchRequest { texts: Vec<String>, source: String, target: String }
+struct AnalyzeBatchRequest {
+    texts: Vec<String>,
+    source: String,
+    target: String,
+}
 #[derive(Serialize)]
-struct AnalyzeBatchResponse { results: Vec<AnalyzeResponse>, count: usize, total_duration_ms: u64 }
+struct AnalyzeBatchResponse {
+    results: Vec<AnalyzeResponse>,
+    count: usize,
+    total_duration_ms: u64,
+}
 
 #[derive(Serialize)]
-struct ErrorResponse { error: String }
+struct ErrorResponse {
+    error: String,
+}
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -163,7 +255,10 @@ fn api_error(model: &str, e: &lingo::Error) -> ApiError {
         E::InvalidLanguagePair(..) | E::UnsupportedLanguage(..) => bad_request(e.to_string()),
         E::ModelNotFound(..) | E::LicenseNotAccepted => {
             warn!("{model}: unavailable: {e}");
-            ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("{model} model is not available on this server"))
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{model} model is not available on this server"),
+            )
         }
         E::Timeout(d) => ApiError(
             StatusCode::GATEWAY_TIMEOUT,
@@ -171,7 +266,10 @@ fn api_error(model: &str, e: &lingo::Error) -> ApiError {
         ),
         _ => {
             error!("{model}: {e}");
-            ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{model} inference failed"))
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{model} inference failed"),
+            )
         }
     }
 }
@@ -218,18 +316,28 @@ struct Slot<T> {
 
 impl<T: WaitIdle> Slot<T> {
     fn new(name: &'static str, make: fn() -> lingo::Result<T>) -> lingo::Result<Self> {
-        Ok(Self { name, current: RwLock::new(Arc::new(make()?)), make })
+        Ok(Self {
+            name,
+            current: RwLock::new(Arc::new(make()?)),
+            make,
+        })
     }
 
     fn get(&self) -> Arc<T> {
-        self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Map an error from `instance`; on timeout, recycle the slot if the
     /// instance does not go idle within `IDLE_GRACE`.
     async fn fail(&self, instance: &Arc<T>, e: lingo::Error) -> ApiError {
         if matches!(e, lingo::Error::Timeout(_)) && instance.wait_idle(IDLE_GRACE).await {
-            warn!("{}: call timed out; abandoned work stopped, instance kept", self.name);
+            warn!(
+                "{}: call timed out; abandoned work stopped, instance kept",
+                self.name
+            );
         } else if matches!(e, lingo::Error::Timeout(_)) {
             let mut cur = self.current.write().unwrap_or_else(|e| e.into_inner());
             if Arc::ptr_eq(&cur, instance) {
@@ -257,15 +365,21 @@ struct AppState {
 impl AppState {
     /// Admit a request or answer 503 when too many are already in flight.
     fn admit(&self) -> std::result::Result<OwnedSemaphorePermit, ApiError> {
-        Arc::clone(&self.admission).try_acquire_owned().map_err(|_| {
-            ApiError(StatusCode::SERVICE_UNAVAILABLE, "server busy; retry later".into())
-        })
+        Arc::clone(&self.admission)
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server busy; retry later".into(),
+                )
+            })
     }
 
     fn check_text(&self, field: &str, text: &str) -> std::result::Result<(), ApiError> {
         if text.len() > self.limits.max_text_bytes {
             return Err(bad_request(format!(
-                "{field} exceeds {} bytes", self.limits.max_text_bytes
+                "{field} exceeds {} bytes",
+                self.limits.max_text_bytes
             )));
         }
         Ok(())
@@ -276,7 +390,10 @@ impl AppState {
             return Err(bad_request("texts array must not be empty"));
         }
         if texts.len() > self.limits.max_batch {
-            return Err(bad_request(format!("texts array exceeds {} items", self.limits.max_batch)));
+            return Err(bad_request(format!(
+                "texts array exceeds {} items",
+                self.limits.max_batch
+            )));
         }
         for (i, t) in texts.iter().enumerate() {
             self.check_text(&format!("texts[{i}]"), t)?;
@@ -284,9 +401,17 @@ impl AppState {
         Ok(())
     }
 
-    async fn translate(&self, text: &str, source: &str, target: &str) -> std::result::Result<lingo::TranslationResult, ApiError> {
+    async fn translate(
+        &self,
+        text: &str,
+        source: &str,
+        target: &str,
+    ) -> std::result::Result<lingo::TranslationResult, ApiError> {
         let t = self.translator.get();
-        match t.translate_with_timeout(text, source, target, self.limits.timeout).await {
+        match t
+            .translate_with_timeout(text, source, target, self.limits.timeout)
+            .await
+        {
             Ok(r) => Ok(r),
             Err(e) => Err(self.translator.fail(&t, e).await),
         }
@@ -300,9 +425,18 @@ impl AppState {
         }
     }
 
-    async fn sonar_score(&self, a: &str, lang_a: &str, b: &str, lang_b: &str) -> std::result::Result<f32, ApiError> {
+    async fn sonar_score(
+        &self,
+        a: &str,
+        lang_a: &str,
+        b: &str,
+        lang_b: &str,
+    ) -> std::result::Result<f32, ApiError> {
         let m = self.sonar.get();
-        match m.score_langs_with_timeout(a, lang_a, b, lang_b, self.limits.timeout).await {
+        match m
+            .score_langs_with_timeout(a, lang_a, b, lang_b, self.limits.timeout)
+            .await
+        {
             Ok(r) => Ok(r),
             Err(e) => Err(self.sonar.fail(&m, e).await),
         }
@@ -316,11 +450,29 @@ impl AppState {
         }
     }
 
-    async fn analyze_one(&self, text: &str, source: &str, target: &str) -> std::result::Result<AnalyzeResponse, ApiError> {
+    async fn sonar_embed(&self, text: &str, lang: &str) -> std::result::Result<Vec<f32>, ApiError> {
+        let m = self.sonar.get();
+        match m
+            .embed_lang_with_timeout(text, lang, self.limits.timeout)
+            .await
+        {
+            Ok(r) => Ok(r),
+            Err(e) => Err(self.sonar.fail(&m, e).await),
+        }
+    }
+
+    async fn analyze_one(
+        &self,
+        text: &str,
+        source: &str,
+        target: &str,
+    ) -> std::result::Result<AnalyzeResponse, ApiError> {
         let start = std::time::Instant::now();
         let translation = self.translate(text, source, target).await?;
         let labse_score = self.labse_score(text, &translation.text).await?;
-        let sonar_score = self.sonar_score(text, source, &translation.text, target).await?;
+        let sonar_score = self
+            .sonar_score(text, source, &translation.text, target)
+            .await?;
         Ok(AnalyzeResponse {
             source_text: text.to_string(),
             translation: translation.text,
@@ -351,7 +503,10 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     })
 }
 
-async fn translate(State(state): State<Arc<AppState>>, Json(req): Json<TranslateRequest>) -> ApiResult<TranslateResponse> {
+async fn translate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TranslateRequest>,
+) -> ApiResult<TranslateResponse> {
     let _permit = state.admit()?;
     state.check_text("text", &req.text)?;
     let r = state.translate(&req.text, &req.source, &req.target).await?;
@@ -364,24 +519,39 @@ async fn translate(State(state): State<Arc<AppState>>, Json(req): Json<Translate
     }))
 }
 
-async fn score(State(state): State<Arc<AppState>>, Json(req): Json<ScoreRequest>) -> ApiResult<ScoreResponse> {
+async fn score(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ScoreRequest>,
+) -> ApiResult<ScoreResponse> {
     let _permit = state.admit()?;
     state.check_text("text1", &req.text1)?;
     state.check_text("text2", &req.text2)?;
     let start = std::time::Instant::now();
     let score = state.labse_score(&req.text1, &req.text2).await?;
-    Ok(Json(ScoreResponse { score, duration_ms: start.elapsed().as_millis() as u64 }))
+    Ok(Json(ScoreResponse {
+        score,
+        duration_ms: start.elapsed().as_millis() as u64,
+    }))
 }
 
-async fn embed(State(state): State<Arc<AppState>>, Json(req): Json<EmbedRequest>) -> ApiResult<EmbedResponse> {
+async fn embed(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EmbedRequest>,
+) -> ApiResult<EmbedResponse> {
     let _permit = state.admit()?;
     state.check_text("text", &req.text)?;
     let embedding = state.labse_embed(&req.text).await?;
     let dimensions = embedding.len();
-    Ok(Json(EmbedResponse { embedding, dimensions }))
+    Ok(Json(EmbedResponse {
+        embedding,
+        dimensions,
+    }))
 }
 
-async fn embed_batch(State(state): State<Arc<AppState>>, Json(req): Json<EmbedBatchRequest>) -> ApiResult<EmbedBatchResponse> {
+async fn embed_batch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EmbedBatchRequest>,
+) -> ApiResult<EmbedBatchResponse> {
     let _permit = state.admit()?;
     state.check_batch(&req.texts)?;
     let mut embeddings = Vec::with_capacity(req.texts.len());
@@ -390,10 +560,73 @@ async fn embed_batch(State(state): State<Arc<AppState>>, Json(req): Json<EmbedBa
     }
     let dimensions = embeddings.first().map_or(0, |e| e.len());
     let count = embeddings.len();
-    Ok(Json(EmbedBatchResponse { embeddings, dimensions, count }))
+    Ok(Json(EmbedBatchResponse {
+        embeddings,
+        dimensions,
+        count,
+    }))
 }
 
-async fn translate_batch(State(state): State<Arc<AppState>>, Json(req): Json<TranslateBatchRequest>) -> ApiResult<TranslateBatchResponse> {
+async fn sonar_embed(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SonarEmbedRequest>,
+) -> ApiResult<SonarEmbedResponse> {
+    let _permit = state.admit()?;
+    state.check_text("text", &req.text)?;
+    let start = std::time::Instant::now();
+    let embedding = state.sonar_embed(&req.text, &req.lang).await?;
+    let dim = embedding.len();
+    Ok(Json(SonarEmbedResponse {
+        embedding,
+        dim,
+        dimensions: dim,
+        duration_ms: start.elapsed().as_millis() as u64,
+    }))
+}
+
+async fn sonar_embed_batch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SonarEmbedBatchRequest>,
+) -> ApiResult<SonarEmbedBatchResponse> {
+    let _permit = state.admit()?;
+    state.check_batch(&req.texts)?;
+    let start = std::time::Instant::now();
+    let mut embeddings = Vec::with_capacity(req.texts.len());
+    for text in &req.texts {
+        embeddings.push(state.sonar_embed(text, &req.lang).await?);
+    }
+    let dim = embeddings.first().map_or(0, |e| e.len());
+    let count = embeddings.len();
+    Ok(Json(SonarEmbedBatchResponse {
+        embeddings,
+        count,
+        dim,
+        dimensions: dim,
+        duration_ms: start.elapsed().as_millis() as u64,
+    }))
+}
+
+async fn sonar_score(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SonarScoreRequest>,
+) -> ApiResult<ScoreResponse> {
+    let _permit = state.admit()?;
+    state.check_text("text1", &req.text1)?;
+    state.check_text("text2", &req.text2)?;
+    let start = std::time::Instant::now();
+    let score = state
+        .sonar_score(&req.text1, &req.lang1, &req.text2, &req.lang2)
+        .await?;
+    Ok(Json(ScoreResponse {
+        score,
+        duration_ms: start.elapsed().as_millis() as u64,
+    }))
+}
+
+async fn translate_batch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TranslateBatchRequest>,
+) -> ApiResult<TranslateBatchResponse> {
     let _permit = state.admit()?;
     state.check_batch(&req.texts)?;
     let start = std::time::Instant::now();
@@ -415,13 +648,23 @@ async fn translate_batch(State(state): State<Arc<AppState>>, Json(req): Json<Tra
     }))
 }
 
-async fn analyze(State(state): State<Arc<AppState>>, Json(req): Json<AnalyzeRequest>) -> ApiResult<AnalyzeResponse> {
+async fn analyze(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AnalyzeRequest>,
+) -> ApiResult<AnalyzeResponse> {
     let _permit = state.admit()?;
     state.check_text("text", &req.text)?;
-    Ok(Json(state.analyze_one(&req.text, &req.source, &req.target).await?))
+    Ok(Json(
+        state
+            .analyze_one(&req.text, &req.source, &req.target)
+            .await?,
+    ))
 }
 
-async fn analyze_batch(State(state): State<Arc<AppState>>, Json(req): Json<AnalyzeBatchRequest>) -> ApiResult<AnalyzeBatchResponse> {
+async fn analyze_batch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AnalyzeBatchRequest>,
+) -> ApiResult<AnalyzeBatchResponse> {
     let _permit = state.admit()?;
     state.check_batch(&req.texts)?;
     let start = std::time::Instant::now();
@@ -430,7 +673,11 @@ async fn analyze_batch(State(state): State<Arc<AppState>>, Json(req): Json<Analy
         results.push(state.analyze_one(text, &req.source, &req.target).await?);
     }
     let count = results.len();
-    Ok(Json(AnalyzeBatchResponse { results, count, total_duration_ms: start.elapsed().as_millis() as u64 }))
+    Ok(Json(AnalyzeBatchResponse {
+        results,
+        count,
+        total_duration_ms: start.elapsed().as_millis() as u64,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +686,11 @@ async fn analyze_batch(State(state): State<Arc<AppState>>, Json(req): Json<Analy
 
 /// Preload a model if its files are present. Failures are logged, not fatal:
 /// endpoints that need the model answer 503 until it becomes available.
-async fn preload(name: &str, downloaded: bool, load: impl std::future::Future<Output = lingo::Result<()>>) {
+async fn preload(
+    name: &str,
+    downloaded: bool,
+    load: impl std::future::Future<Output = lingo::Result<()>>,
+) {
     if !downloaded {
         println!("  {name}: not found (endpoints using it will return 503)");
         return;
@@ -493,7 +744,10 @@ async fn main() -> anyhow::Result<()> {
     };
     let max_pending: usize = env_parse("LINGO_MAX_PENDING", 32usize).max(1);
     // Largest legitimate body: a full batch of max-size texts plus JSON overhead.
-    let body_limit = limits.max_batch.saturating_mul(limits.max_text_bytes).saturating_add(64 * 1024);
+    let body_limit = limits
+        .max_batch
+        .saturating_mul(limits.max_text_bytes)
+        .saturating_add(64 * 1024);
 
     let state = Arc::new(AppState {
         translator: Slot::new("NLLB-200", || NllbTranslator::new(None))?,
@@ -516,6 +770,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/score", post(score))
         .route("/embed", post(embed))
         .route("/embed_batch", post(embed_batch))
+        // Model-named routes: /labse/* are aliases of /score, /embed, /embed_batch.
+        .route("/labse/score", post(score))
+        .route("/labse/embed", post(embed))
+        .route("/labse/embed_batch", post(embed_batch))
+        .route("/sonar/score", post(sonar_score))
+        .route("/sonar/embed", post(sonar_embed))
+        .route("/sonar/embed_batch", post(sonar_embed_batch))
         .route("/analyze", post(analyze))
         .route("/analyze_batch", post(analyze_batch))
         .layer(DefaultBodyLimit::max(body_limit))

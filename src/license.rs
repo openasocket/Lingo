@@ -15,15 +15,16 @@ pub fn license_accepted() -> bool {
     if std::env::var("LINGO_ACCEPT_LICENSE").as_deref() == Ok("1") {
         return true;
     }
-    sentinel_path()
-        .map(|p| p.exists())
-        .unwrap_or(false)
+    sentinel_path().map(|p| p.exists()).unwrap_or(false)
 }
 
 /// Creates the sentinel file (and parent directories) to record acceptance.
 pub fn mark_license_accepted() -> std::io::Result<()> {
     let path = sentinel_path().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "Cannot determine home directory")
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Cannot determine home directory",
+        )
     })?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -83,7 +84,9 @@ mod tests {
     #[test]
     fn sentinel_path_is_under_cache() {
         let path = sentinel_path().expect("home dir should exist in test");
-        assert!(path.to_string_lossy().contains(".cache/lingo/.license-accepted"));
+        assert!(path
+            .to_string_lossy()
+            .contains(".cache/lingo/.license-accepted"));
     }
 
     #[test]

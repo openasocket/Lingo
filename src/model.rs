@@ -296,7 +296,11 @@ impl EncoderLayer {
     fn load(vb: VarBuilder, cfg: &NllbConfig) -> CandleResult<Self> {
         Ok(Self {
             self_attn: MultiHeadAttention::load(vb.pp("self_attn"), cfg, false)?,
-            self_attn_layer_norm: manual_layer_norm(cfg.d_model, 1e-5, vb.pp("self_attn_layer_norm"))?,
+            self_attn_layer_norm: manual_layer_norm(
+                cfg.d_model,
+                1e-5,
+                vb.pp("self_attn_layer_norm"),
+            )?,
             fc1: linear(cfg.d_model, cfg.encoder_ffn_dim, vb.pp("fc1"))?,
             fc2: linear(cfg.encoder_ffn_dim, cfg.d_model, vb.pp("fc2"))?,
             final_layer_norm: manual_layer_norm(cfg.d_model, 1e-5, vb.pp("final_layer_norm"))?,
@@ -335,9 +339,17 @@ impl DecoderLayer {
     fn load(vb: VarBuilder, cfg: &NllbConfig) -> CandleResult<Self> {
         Ok(Self {
             self_attn: MultiHeadAttention::load(vb.pp("self_attn"), cfg, true)?,
-            self_attn_layer_norm: manual_layer_norm(cfg.d_model, 1e-5, vb.pp("self_attn_layer_norm"))?,
+            self_attn_layer_norm: manual_layer_norm(
+                cfg.d_model,
+                1e-5,
+                vb.pp("self_attn_layer_norm"),
+            )?,
             encoder_attn: MultiHeadAttention::load(vb.pp("encoder_attn"), cfg, true)?,
-            encoder_attn_layer_norm: manual_layer_norm(cfg.d_model, 1e-5, vb.pp("encoder_attn_layer_norm"))?,
+            encoder_attn_layer_norm: manual_layer_norm(
+                cfg.d_model,
+                1e-5,
+                vb.pp("encoder_attn_layer_norm"),
+            )?,
             fc1: linear(cfg.d_model, cfg.decoder_ffn_dim, vb.pp("fc1"))?,
             fc2: linear(cfg.decoder_ffn_dim, cfg.d_model, vb.pp("fc2"))?,
             final_layer_norm: manual_layer_norm(cfg.d_model, 1e-5, vb.pp("final_layer_norm"))?,
@@ -370,9 +382,12 @@ impl DecoderLayer {
 
         let residual = &x;
         let x = self.encoder_attn_layer_norm.forward(&x)?;
-        let (x, new_cross_kv) =
-            self.encoder_attn
-                .forward(&x, Some(encoder_output), cache.cross_attn_kv.as_ref(), None)?;
+        let (x, new_cross_kv) = self.encoder_attn.forward(
+            &x,
+            Some(encoder_output),
+            cache.cross_attn_kv.as_ref(),
+            None,
+        )?;
         cache.cross_attn_kv = new_cross_kv;
         let x = (residual + x)?;
 
@@ -478,8 +493,13 @@ impl NllbModel {
         let shared_embeddings = embedding(cfg.vocab_size, cfg.d_model, model_vb.pp("shared"))?;
 
         let weight_dtype = shared_embeddings.embeddings().dtype();
-        let pos_embeddings =
-            sinusoidal_embeddings(cfg.max_position_embeddings, cfg.d_model, 2, weight_dtype, device)?;
+        let pos_embeddings = sinusoidal_embeddings(
+            cfg.max_position_embeddings,
+            cfg.d_model,
+            2,
+            weight_dtype,
+            device,
+        )?;
 
         let mut encoder_layers = Vec::with_capacity(cfg.encoder_layers);
         for i in 0..cfg.encoder_layers {
@@ -611,9 +631,7 @@ impl NllbModel {
 
     fn causal_mask(&self, size: usize, dtype: DType, device: &Device) -> CandleResult<Tensor> {
         let mask: Vec<f32> = (0..size)
-            .flat_map(|i| {
-                (0..size).map(move |j| if j <= i { 0.0 } else { f32::NEG_INFINITY })
-            })
+            .flat_map(|i| (0..size).map(move |j| if j <= i { 0.0 } else { f32::NEG_INFINITY }))
             .collect();
         Tensor::from_vec(mask, (1, 1, size, size), device)?.to_dtype(dtype)
     }
@@ -734,10 +752,7 @@ impl NllbModel {
                 break;
             }
             let logits = self.decode_step(next_token, &mut cache, encoder_output, position)?;
-            next_token = logits
-                .i((.., 0, ..))?
-                .argmax(D::Minus1)?
-                .to_vec1::<u32>()?[0];
+            next_token = logits.i((.., 0, ..))?.argmax(D::Minus1)?.to_vec1::<u32>()?[0];
         }
 
         if stop == StopReason::Budget {
@@ -778,8 +793,7 @@ impl NllbModel {
         cancelled: &dyn Fn() -> bool,
     ) -> CandleResult<(Vec<u32>, StopReason)> {
         let device = encoder_output.device();
-        let mut token_ids: Vec<u32> =
-            vec![self.config.decoder_start_token_id, forced_bos_token_id];
+        let mut token_ids: Vec<u32> = vec![self.config.decoder_start_token_id, forced_bos_token_id];
 
         // Same clamp as `generate`: with a 2-token seed the decoder can emit at
         // most `max_position_embeddings - 1` tokens before a position would
@@ -793,8 +807,7 @@ impl NllbModel {
                 stop = StopReason::Cancelled;
                 break;
             }
-            let decoder_input =
-                Tensor::from_vec(token_ids.clone(), (1, token_ids.len()), device)?;
+            let decoder_input = Tensor::from_vec(token_ids.clone(), (1, token_ids.len()), device)?;
 
             // `None` => full-prefix recompute with a discarded cache, matching
             // the original pre-KV-cache code path exactly.
@@ -922,12 +935,22 @@ mod tests {
 
         let encoder_layers = (0..cfg.encoder_layers)
             .map(|_| {
-                build_encoder_layer(cfg.d_model, cfg.encoder_attention_heads, cfg.encoder_ffn_dim, device)
+                build_encoder_layer(
+                    cfg.d_model,
+                    cfg.encoder_attention_heads,
+                    cfg.encoder_ffn_dim,
+                    device,
+                )
             })
             .collect();
         let decoder_layers = (0..cfg.decoder_layers)
             .map(|_| {
-                build_decoder_layer(cfg.d_model, cfg.decoder_attention_heads, cfg.decoder_ffn_dim, device)
+                build_decoder_layer(
+                    cfg.d_model,
+                    cfg.decoder_attention_heads,
+                    cfg.decoder_ffn_dim,
+                    device,
+                )
             })
             .collect();
 
@@ -1191,12 +1214,18 @@ mod tests {
         let expected = {
             let residual = &x;
             let h = layer.self_attn_layer_norm.forward(&x).unwrap();
-            let (h, _) = layer.self_attn.forward(&h, None, None, Some(&causal)).unwrap();
+            let (h, _) = layer
+                .self_attn
+                .forward(&h, None, None, Some(&causal))
+                .unwrap();
             let h = (residual + h).unwrap();
 
             let residual = &h;
             let hn = layer.encoder_attn_layer_norm.forward(&h).unwrap();
-            let (hn, _) = layer.encoder_attn.forward(&hn, Some(&enc), None, None).unwrap();
+            let (hn, _) = layer
+                .encoder_attn
+                .forward(&hn, Some(&enc), None, None)
+                .unwrap();
             let h = (residual + hn).unwrap();
 
             let residual = &h;
@@ -1226,7 +1255,9 @@ mod tests {
         let x = Tensor::randn(0f32, 1f32, (b, 2, d_model), &device).unwrap();
         let causal2 = make_causal_mask(2, &device);
         let mut full_cache = LayerCache::default();
-        let full_out = layer.forward(&x, &enc, Some(&causal2), &mut full_cache).unwrap();
+        let full_out = layer
+            .forward(&x, &enc, Some(&causal2), &mut full_cache)
+            .unwrap();
         let full_pos1 = full_out.i((.., 1..2, ..)).unwrap();
 
         // Split into individual token slices.
@@ -1236,7 +1267,9 @@ mod tests {
         // 2. Run tok0 through the layer with an empty cache (fills K/V for tok0).
         let mut cache = LayerCache::default();
         let mask0 = make_causal_mask(1, &device);
-        let _ = layer.forward(&tok0, &enc, Some(&mask0), &mut cache).unwrap();
+        let _ = layer
+            .forward(&tok0, &enc, Some(&mask0), &mut cache)
+            .unwrap();
 
         // 3. Run just tok1 with the cache from step 2. The new token attends to
         //    both cached positions, so no further masking is needed.
@@ -1303,11 +1336,16 @@ mod tests {
                 Tensor::randn(0f32, 1f32, (1usize, enc_len, cfg.d_model), &device).unwrap();
             let forced_bos = 3u32;
 
-            let cached = model.generate(&encoder_output, forced_bos, 16, &|| false).unwrap();
+            let cached = model
+                .generate(&encoder_output, forced_bos, 16, &|| false)
+                .unwrap();
             let reference = model
                 .generate_reference(&encoder_output, forced_bos, 16, &|| false)
                 .unwrap();
-            assert_eq!(cached.1, reference.1, "stop reasons diverged for enc_len={enc_len}");
+            assert_eq!(
+                cached.1, reference.1,
+                "stop reasons diverged for enc_len={enc_len}"
+            );
             let (cached, reference) = (cached.0, reference.0);
 
             assert_eq!(
@@ -1323,9 +1361,12 @@ mod tests {
         let device = Device::Cpu;
         let cfg = tiny_config();
         let model = build_tiny_model(&cfg, &device);
-        let encoder_output = Tensor::randn(0f32, 1f32, (1usize, 4usize, cfg.d_model), &device).unwrap();
+        let encoder_output =
+            Tensor::randn(0f32, 1f32, (1usize, 4usize, cfg.d_model), &device).unwrap();
 
-        let (out, _) = model.generate_reference(&encoder_output, 3u32, 16, &|| false).unwrap();
+        let (out, _) = model
+            .generate_reference(&encoder_output, 3u32, 16, &|| false)
+            .unwrap();
 
         assert!(
             !out.contains(&cfg.eos_token_id),

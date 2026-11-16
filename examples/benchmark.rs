@@ -23,19 +23,29 @@ async fn main() -> anyhow::Result<()> {
 
     // Cold translation (first target)
     let start = Instant::now();
-    let result = translator.translate("Hello, how are you?", "en", "fr").await?;
+    let result = translator
+        .translate("Hello, how are you?", "en", "fr")
+        .await?;
     let nllb_cold_ms = start.elapsed().as_millis();
-    println!("NLLB translation (short, cold): {}ms  -> {}", nllb_cold_ms, result.text);
+    println!(
+        "NLLB translation (short, cold): {}ms  -> {}",
+        nllb_cold_ms, result.text
+    );
 
     // Warm translations (subsequent targets, encoder cached)
     let warm_targets = ["es", "de", "ja", "ko", "ar"];
     let mut warm_times = Vec::new();
     for target in &warm_targets {
         let start = Instant::now();
-        let result = translator.translate("Hello, how are you?", "en", target).await?;
+        let result = translator
+            .translate("Hello, how are you?", "en", target)
+            .await?;
         let ms = start.elapsed().as_millis();
         warm_times.push(ms);
-        println!("NLLB translation (short, warm -> {}): {}ms  -> {}", target, ms, result.text);
+        println!(
+            "NLLB translation (short, warm -> {}): {}ms  -> {}",
+            target, ms, result.text
+        );
     }
     let avg_warm = warm_times.iter().sum::<u128>() / warm_times.len() as u128;
     println!("NLLB translation (short, warm avg): {}ms", avg_warm);
@@ -51,7 +61,12 @@ async fn main() -> anyhow::Result<()> {
         let result = translator.translate(paragraph, "en", target).await?;
         let ms = start.elapsed().as_millis();
         para_times.push(ms);
-        println!("NLLB paragraph -> {}: {}ms  ({} chars)", target, ms, result.text.len());
+        println!(
+            "NLLB paragraph -> {}: {}ms  ({} chars)",
+            target,
+            ms,
+            result.text.len()
+        );
     }
     let para_avg = para_times.iter().sum::<u128>() / para_times.len() as u128;
     println!("NLLB paragraph avg: {}ms", para_avg);
@@ -60,7 +75,9 @@ async fn main() -> anyhow::Result<()> {
     let multi_targets = ["fr", "es", "de", "ja", "ko", "ar", "zh", "hi", "pt", "ru"];
     let start = Instant::now();
     for target in &multi_targets {
-        translator.translate("Hello, how are you?", "en", target).await?;
+        translator
+            .translate("Hello, how are you?", "en", target)
+            .await?;
     }
     let multi_ms = start.elapsed().as_millis();
     println!("NLLB multi-target (10 languages): {}ms total", multi_ms);
@@ -79,14 +96,25 @@ async fn main() -> anyhow::Result<()> {
     let start = Instant::now();
     let score = labse.score("Hello world", "Bonjour le monde").await?;
     let labse_first_ms = start.elapsed().as_millis();
-    println!("LaBSE first score: {}ms  (score={:.4})", labse_first_ms, score);
+    println!(
+        "LaBSE first score: {}ms  (score={:.4})",
+        labse_first_ms, score
+    );
 
     // Warm scoring
     let pairs = [
         ("Hello world", "Bonjour le monde", "en-fr"),
         ("Hello world", "Hola mundo", "en-es"),
-        ("Hello world", "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\u{4e16}\u{754c}", "en-ja"),
-        ("The cat sat on the mat", "The dog ran in the park", "unrelated"),
+        (
+            "Hello world",
+            "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\u{4e16}\u{754c}",
+            "en-ja",
+        ),
+        (
+            "The cat sat on the mat",
+            "The dog ran in the park",
+            "unrelated",
+        ),
         ("I love programming", "I love programming", "identical"),
     ];
 
@@ -101,7 +129,10 @@ async fn main() -> anyhow::Result<()> {
         let score = labse2.score(t1, t2).await?;
         let ms = start.elapsed().as_millis();
         labse_times.push(ms);
-        println!("  {:<40} {:<40} {:<10} {:.4}  ({}ms)", t1, t2, label, score, ms);
+        println!(
+            "  {:<40} {:<40} {:<10} {:.4}  ({}ms)",
+            t1, t2, label, score, ms
+        );
     }
     let labse_avg = labse_times.iter().sum::<u128>() / labse_times.len() as u128;
     println!("LaBSE avg per pair: {}ms", labse_avg);
@@ -119,7 +150,10 @@ async fn main() -> anyhow::Result<()> {
     let start = Instant::now();
     let score = sonar.score("Hello world", "Bonjour le monde").await?;
     let sonar_first_ms = start.elapsed().as_millis();
-    println!("SONAR first score: {}ms  (score={:.4})", sonar_first_ms, score);
+    println!(
+        "SONAR first score: {}ms  (score={:.4})",
+        sonar_first_ms, score
+    );
 
     // Warm scoring with fresh encoder
     let sonar2 = SonarEncoder::new(None)?;
@@ -132,7 +166,10 @@ async fn main() -> anyhow::Result<()> {
         let score = sonar2.score(t1, t2).await?;
         let ms = start.elapsed().as_millis();
         sonar_times.push(ms);
-        println!("  {:<40} {:<40} {:<10} {:.4}  ({}ms)", t1, t2, label, score, ms);
+        println!(
+            "  {:<40} {:<40} {:<10} {:.4}  ({}ms)",
+            t1, t2, label, score, ms
+        );
     }
     let sonar_avg = sonar_times.iter().sum::<u128>() / sonar_times.len() as u128;
     println!("SONAR avg per pair: {}ms", sonar_avg);
@@ -140,17 +177,26 @@ async fn main() -> anyhow::Result<()> {
     // ---- Summary ----
     println!("\n=== Summary ===\n");
     println!("NLLB model load:              {}ms", nllb_load_ms);
-    println!("NLLB cold start:              {}ms", nllb_load_ms as u128 + nllb_cold_ms);
+    println!(
+        "NLLB cold start:              {}ms",
+        nllb_load_ms + nllb_cold_ms
+    );
     println!("NLLB short warm avg:          {}ms", avg_warm);
     println!("NLLB paragraph avg:           {}ms", para_avg);
     println!("NLLB 10-lang total:           {}ms", multi_ms);
     println!();
     println!("LaBSE model load:             {}ms", labse_load_ms);
-    println!("LaBSE cold start:             {}ms", labse_load_ms as u128 + labse_first_ms);
+    println!(
+        "LaBSE cold start:             {}ms",
+        labse_load_ms + labse_first_ms
+    );
     println!("LaBSE per pair avg:           {}ms", labse_avg);
     println!();
     println!("SONAR model load:             {}ms", sonar_load_ms);
-    println!("SONAR cold start:             {}ms", sonar_load_ms as u128 + sonar_first_ms);
+    println!(
+        "SONAR cold start:             {}ms",
+        sonar_load_ms + sonar_first_ms
+    );
     println!("SONAR per pair avg:           {}ms", sonar_avg);
 
     Ok(())

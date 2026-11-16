@@ -49,7 +49,8 @@ async fn main() -> anyhow::Result<()> {
                         map.remove(key);
                     }
                 }
-                let field = |name: &str| request.get(name).and_then(Value::as_str).map(str::to_owned);
+                let field =
+                    |name: &str| request.get(name).and_then(Value::as_str).map(str::to_owned);
                 match (field("text"), field("source"), field("target")) {
                     (Some(text), Some(source), Some(target)) => {
                         match translator.translate(&text, &source, &target).await {
@@ -65,7 +66,9 @@ async fn main() -> anyhow::Result<()> {
                 request
             }
             Ok(_) => serde_json::json!({ "line": index + 1, "error": "expected a JSON object" }),
-            Err(error) => serde_json::json!({ "line": index + 1, "error": format!("invalid JSON: {error}") }),
+            Err(error) => {
+                serde_json::json!({ "line": index + 1, "error": format!("invalid JSON: {error}") })
+            }
         };
         if record.get("error").is_some() {
             failed += 1;

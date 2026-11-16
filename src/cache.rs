@@ -39,7 +39,10 @@ impl KeySize for String {
 impl<K: Eq + Hash + Clone + KeySize, V: Clone> BoundedCache<K, V> {
     pub(crate) fn new(capacity: usize, max_key_bytes: usize) -> Self {
         Self {
-            inner: Mutex::new(Inner { map: HashMap::new(), order: VecDeque::new() }),
+            inner: Mutex::new(Inner {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+            }),
             capacity,
             max_key_bytes,
         }

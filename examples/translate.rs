@@ -31,7 +31,10 @@ async fn main() -> anyhow::Result<()> {
     for (code, name) in &targets {
         match translator.translate(text, "en", code).await {
             Ok(result) => {
-                println!("[{}] {}: {} ({}ms)", code, name, result.text, result.duration_ms);
+                println!(
+                    "[{}] {}: {} ({}ms)",
+                    code, name, result.text, result.duration_ms
+                );
             }
             Err(e) => {
                 eprintln!("[{}] {}: Error - {}", code, name, e);
